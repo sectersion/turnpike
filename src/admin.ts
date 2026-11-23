@@ -26,12 +26,12 @@ const validBaseUrl = (s: unknown) => {
   return u.protocol === "https:" || (u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1"));
 };
 // undefined: absent; null: clear; else a validated number (rpm/tpm must be integers).
-const limit = (b: Record<string, unknown>, f: "rpm" | "tpm" | "monthlyUsd" | "dailyUsd"): number | null | undefined => {
+const limit = (b: Record<string, unknown>, f: "rpm" | "tpm" | "monthlyUsd" | "dailyUsd" | "maxInFlight"): number | null | undefined => {
   if (!(f in b) || b[f] === undefined) return undefined;
   const v = b[f];
   if (v === null) return null;
   if (num(v) && (f === "monthlyUsd" || f === "dailyUsd" || Number.isInteger(v))) return v as number;
-  throw bad(`${f} must be ${f === "rpm" || f === "tpm" ? "a non-negative integer" : "a non-negative number"} or null`);
+  throw bad(`${f} must be ${f === "monthlyUsd" || f === "dailyUsd" ? "a non-negative number" : "a non-negative integer"} or null`);
 };
 const redact = (a: Account) => ({ ...a, secret: "***" });
 admin.onError((e, c) => (e instanceof HTTPException ? e.getResponse() : c.json({ error: { message: "internal error" } }, 500)));
@@ -44,12 +44,20 @@ admin.post("/keys", async (c) => {
   const d = limit(b, "dailyUsd"), m = limit(b, "monthlyUsd");
   if (d != null) i.dailyUsd = d;
   if (m != null) i.monthlyUsd = m;
+  const rpm = limit(b, "rpm"), mif = limit(b, "maxInFlight");
+  if (rpm !== undefined) i.rpm = rpm;
+  if (mif !== undefined) i.maxInFlight = mif;
   const al = b.allowedAccountIds;
   if (al != null) {
     if (!Array.isArray(al) || al.length > 200 || al.some((x) => typeof x !== "string")) throw bad("allowedAccountIds must be an array of at most 200 strings");
     i.allowedAccountIds = al;
   }
   return c.json(await hub(c.env).createKey(i), 201);
+});
+admin.patch("/keys/:id", async (c) => {
+  const b = await body(c);
+  const k = await hub(c.env).patchKey(c.req.param("id"), { rpm: limit(b, "rpm"), maxInFlight: limit(b, "maxInFlight") });
+  return k ? c.json(k) : c.json({ error: { message: "not found" } }, 404);
 });
 admin.delete("/keys/:id", async (c) => {
   await hub(c.env).revokeKey(c.req.param("id"));
