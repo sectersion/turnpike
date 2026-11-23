@@ -31,17 +31,20 @@ export async function callUpstream(t: Target, format: Format, body: unknown, fet
   const { native, defaultBaseUrl } = PROVIDERS[account.kind];
   const base = (account.baseUrl ?? defaultBaseUrl ?? "").replace(/\/+$/, "");
   if (!base) throw new Error("account has no baseUrl");
-  if (!apiKey(account)) throw new Error("account has no api key");
+  const key = apiKey(account);
+  if (!key && account.kind !== "custom-openai" && account.kind !== "custom-anthropic") throw new Error("account has no api key");
   const stream = (body as { stream?: unknown }).stream === true;
 
   let req: any = { ...(body as object), model };
   if (format !== native) req = { ...(format === "openai" ? openaiReqToAnthropic(req) : anthropicReqToOpenai(req)), model };
 
+  if (stream && native === "openai") req.stream_options = { ...req.stream_options, include_usage: true };
+
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (native === "anthropic") {
-    headers["x-api-key"] = apiKey(account);
+    if (key) headers["x-api-key"] = key;
     headers["anthropic-version"] = "2023-06-01";
-  } else headers.Authorization = `Bearer ${apiKey(account)}`;
+  } else if (key) headers.Authorization = `Bearer ${key}`;
 
   const res = await fetchFn(`${base}${native === "openai" ? "/chat/completions" : "/messages"}`, {
     method: "POST",
@@ -51,12 +54,12 @@ export async function callUpstream(t: Target, format: Format, body: unknown, fet
   if (!res.ok || format === native) return res;
 
   const h = new Headers(res.headers);
+  h.delete("content-length");
   if (stream && res.body) {
     const tr = native === "anthropic" ? anthropicSseToOpenaiSse() : openaiSseToAnthropicSse(model);
     return new Response(res.body.pipeThrough(tr), { status: res.status, headers: h });
   }
   const data: any = await res.json();
-  h.delete("content-length");
   return new Response(JSON.stringify(native === "anthropic" ? anthropicResToOpenai(data) : openaiResToAnthropic(data)), {
     status: res.status,
     headers: h,

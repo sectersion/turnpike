@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { admin } from "./admin";
 import { requireKey, type AppEnv } from "./auth";
+import { proxy } from "./proxy";
 
 export { Hub } from "./hub";
 
@@ -10,6 +11,6 @@ app.get("/health", (c) => c.json({ ok: true }));
 app.route("/admin", admin);
 
 app.use("/v1/*", requireKey);
-app.get("/v1/models", (c) => c.json({ object: "list", data: [] })); // Task 6 fills this in
+app.route("/v1", proxy);
 
 export default app;
