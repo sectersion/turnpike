@@ -6,7 +6,6 @@ export type { Target };
 const err = (status: number, message: string) =>
   new Response(JSON.stringify({ error: { message } }), { status, headers: { "content-type": "application/json" } });
 
-// Ignores the allow-list; callers use explainEmpty to tell 404 from 403.
 function expand(model: string, accounts: Account[], combos: Combo[]): Target[] {
   const live = (id: string) => accounts.find((a) => a.id === id && a.enabled);
   const combo = combos.find((c) => c.name === model);
@@ -22,8 +21,6 @@ export function resolveTargets(model: string, accounts: Account[], combos: Combo
   return expand(model, accounts, combos).filter((t) => !allowed || allowed.includes(t.account.id));
 }
 
-export const explainEmpty = (model: string, accounts: Account[], combos: Combo[]): "unknown_model" | "not_allowed" =>
-  expand(model, accounts, combos).length ? "not_allowed" : "unknown_model";
 
 // 3xx (redirects are never followed) and 401/402/403 are account-level failures: try the next target.
 export const isAccountFailure = (s: number) => (s >= 300 && s < 400) || s === 401 || s === 402 || s === 403;
@@ -64,6 +61,8 @@ export async function routeWithFallback(
       last = await callUpstream(t, format, body, fetchFn, authHeaders, maxOut);
     } catch (e) {
       last = e instanceof Error ? e : new Error(String(e));
+      // Server-side only: messages carry account ids, URLs and HTTP statuses, never credentials.
+      console.warn(`upstream attempt failed (account ${t.account.id}): ${last.message}`);
     }
     try {
       onAttempt?.(t, last, reservationId);
@@ -75,7 +74,7 @@ export async function routeWithFallback(
   if (last instanceof Response) return last;
   if (gated)
     return Response.json({ error: { message: `limit: ${gated}`, type: "rate_limit" } }, { status: 429 });
-  return err(502, `upstream failed: ${last.message}`);
+  return err(502, "upstream failed"); // detail stays in the server log above
 }
 
 export type Gate = { ok: true; reservationId: string; maxOut?: number } | { ok: false; reason: string };

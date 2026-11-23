@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { hub } from "./hub-client";
 import { badTools, outCap, type Format, type Target } from "./providers";
-import { explainEmpty, isAccountFailure, resolveTargets, routeWithFallback } from "./router";
+import { isAccountFailure, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
 import { usageTap } from "./translate/stream";
 import type { Account } from "./types";
@@ -64,10 +64,8 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
   const key = c.get("key");
   const [accounts, combos] = await Promise.all([hub(c.env).listAccounts(false), hub(c.env).listCombos()]);
   const targets = resolveTargets(model, accounts, combos, key.allowedAccountIds);
-  if (!targets.length)
-    return explainEmpty(model, accounts, combos) === "not_allowed"
-      ? fail(format, 403, "permission_error", "this key may not use that model")
-      : fail(format, 404, "not_found_error", `unknown model: ${model}`);
+  // Same answer for "exists but not on this key" and "does not exist": no probing of names.
+  if (!targets.length) return fail(format, 404, "not_found_error", `unknown model: ${model}`);
 
   const h = hub(c.env);
   const safe = (p: Promise<void>) => p.catch(() => {});
@@ -113,7 +111,10 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
     for (const rid of reserved) if (rid !== keep) bg(() => h.release(rid));
   }
   const win = attempts.find((a) => a.r === res);
+  if (!win && gated === "unpriced")
+    return fail(format, 400, "invalid_request_error", "limit: unpriced (this model has no known price and the key has a USD cap; the owner must add a price override)");
   if (!win && gated) return fail(format, 429, "rate_limit", `limit: ${gated}`);
+  if (!win) return fail(format, 502, "api_error", "upstream failed");
   if (win && !res.ok) return upstreamError(format, res);
   if (!res.ok || !win?.rid) return res;
   const winner = win.t;

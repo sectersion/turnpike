@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { explainEmpty, isFallbackEligible, resolveTargets, routeWithFallback } from "../src/router";
+import { describe, expect, it, vi } from "vitest";
+import { isFallbackEligible, resolveTargets, routeWithFallback } from "../src/router";
 import { callUpstream } from "../src/providers";
 import type { Account, Combo } from "../src/types";
 
@@ -47,11 +47,9 @@ describe("resolveTargets", () => {
   it("combo expands in order; combo name wins", () => {
     expect(resolveTargets("fast", accounts, combos, null).map((t) => t.model)).toEqual(["m1", "m2"]);
   });
-  it("allow-list removes disallowed targets; empty result is not_allowed", () => {
+  it("allow-list removes disallowed targets", () => {
     expect(resolveTargets("fast", accounts, combos, ["b"]).map((t) => t.account.id)).toEqual(["b"]);
     expect(resolveTargets("fast", accounts, combos, [])).toEqual([]);
-    expect(explainEmpty("fast", accounts, combos)).toBe("not_allowed");
-    expect(explainEmpty("nope/x", accounts, combos)).toBe("unknown_model");
   });
   it("disabled accounts are skipped", () => {
     const off = [{ ...A, enabled: false }, B, C];
@@ -102,7 +100,7 @@ describe("routeWithFallback", () => {
     const seen: unknown[] = [];
     const r2 = await routeWithFallback(targets, "openai", oai, fakeFetch(new Error("boom")).f, (_t, r) => seen.push(r));
     expect(r2.status).toBe(502);
-    expect(((await r2.json()) as any).error.message).toContain("boom");
+    expect(((await r2.json()) as any).error.message).toBe("upstream failed"); // M8: detail only in the server log
     expect(seen.length).toBe(2);
   });
   it("gate: rejected targets are skipped unfetched; reservation ids reach onAttempt; all gated is 429", async () => {
@@ -225,20 +223,26 @@ describe("robustness", () => {
     expect((await routeWithFallback(two, "openai", oai, f)).status).toBe(200);
     expect(order).toEqual(["cancel", "second"]);
   });
-  it("empty baseUrl fails before fetch with a clear 502", async () => {
+  it("empty baseUrl fails before fetch with a generic 502; detail goes to the log", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { f, calls } = fakeFetch(json(200));
     const t = [{ account: acc("x", "custom-openai"), model: "m" }];
     const res = await routeWithFallback(t, "openai", oai, f);
     expect(calls.length).toBe(0);
     expect(res.status).toBe(502);
-    expect(((await res.json()) as any).error.message).toContain("no baseUrl");
+    expect(((await res.json()) as any).error.message).toBe("upstream failed");
+    expect(String(warn.mock.calls[0][0])).toContain("no baseUrl");
+    warn.mockRestore();
   });
   it("missing api key fails before fetch", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { f, calls } = fakeFetch(json(200));
     const t = [{ account: acc("x", "openrouter", { secret: "" }), model: "m" }];
     const res = await routeWithFallback(t, "openai", oai, f);
     expect(calls.length).toBe(0);
-    expect(((await res.json()) as any).error.message).toContain("no api key");
+    expect(((await res.json()) as any).error.message).toBe("upstream failed");
+    expect(String(warn.mock.calls[0][0])).toContain("no api key");
+    warn.mockRestore();
   });
   it("a throwing onAttempt does not break routing", async () => {
     const { f, calls } = fakeFetch(json(429), json(200, { second: true }));

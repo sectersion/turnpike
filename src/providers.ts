@@ -18,7 +18,7 @@ export const PROVIDERS: Record<AccountKind, { native: Format; defaultBaseUrl?: s
   "custom-openai": { native: "openai" },
   "custom-anthropic": { native: "anthropic" },
   "codex-oauth": { native: "openai" }, // deferred until OpenAI offers an official third-party login usable here; no executor yet
-  "copilot-oauth": { native: "openai", defaultBaseUrl: "https://api.githubcopilot.com" }, // verified: see src/oauth/copilot.ts
+  "copilot-oauth": { native: "openai", defaultBaseUrl: "https://api.githubcopilot.com" }, // unverified: no live call made, see src/oauth/copilot.ts
 };
 
 // Output-token limit: DEFAULT_OUT when the client sends none, never above MAX_OUT. The same value is

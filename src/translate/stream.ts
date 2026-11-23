@@ -202,11 +202,15 @@ export function openaiSseToAnthropicSse(model: string): TransformStream<Uint8Arr
 export function usageTap(onUsage: (u: Usage | null) => void): TransformStream<Uint8Array, Uint8Array> {
   let seen: { i?: number; o?: number; cw?: number; cr?: number } = {};
   let reported = false;
-  const report = () => {
+  let chars = 0; // streamed text/tool-argument characters, for an output floor if the stream is cut short
+  // aborted: the client cancelled or upstream failed, so the final output count (Anthropic sends it only in
+  // the last message_delta) may be missing; charge at least ~4 characters per streamed token.
+  const report = (aborted = false) => {
     if (reported) return;
     reported = true;
     const { i, o, cw, cr } = seen;
-    onUsage(i === undefined && o === undefined ? null : toUsage(i ?? 0, o ?? 0, cw, cr));
+    const out = aborted ? Math.max(o ?? 0, Math.ceil(chars / 4)) : (o ?? 0);
+    onUsage(i === undefined && o === undefined ? null : toUsage(i ?? 0, out, cw, cr));
   };
   const merge = (u: unknown) => {
     const f = usageFields(u);
@@ -215,6 +219,9 @@ export function usageTap(onUsage: (u: Usage | null) => void): TransformStream<Ui
   const p = sseParser(({ data }) => {
     const d = tryJson(data);
     if (!d) return;
+    const dl = d.delta ?? d.choices?.[0]?.delta;
+    for (const s of [dl?.text, dl?.partial_json, dl?.content, ...(dl?.tool_calls ?? []).map((t: any) => t?.function?.arguments)])
+      if (typeof s === "string") chars += s.length;
     if (d.type === "message_start" && d.message?.usage) merge(d.message.usage);
     else if (d.type === "message_delta" && d.usage) merge(d.usage);
     else if (d.usage && typeof d.usage.prompt_tokens === "number") merge({ completion_tokens: 0, ...d.usage });
@@ -238,13 +245,13 @@ export function usageTap(onUsage: (u: Usage | null) => void): TransformStream<Ui
         if (done) ctrl.close();
         else ctrl.enqueue(value);
       } catch (e) {
-        report(); // upstream aborted/errored: keep usage seen so far
+        report(true); // upstream aborted/errored: keep usage seen so far
         throw e;
       }
     },
     async cancel(reason) {
       p.end();
-      report();
+      report(true);
       await reader.cancel(reason);
     },
   });
