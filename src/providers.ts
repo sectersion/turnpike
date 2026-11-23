@@ -10,11 +10,11 @@ import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "./translate/st
 export type Format = "openai" | "anthropic";
 export type Target = { account: Account; model: string };
 
-// TODO(verify): the three default base URLs below are unverified; confirm against provider docs before shipping.
+// OpenCode URLs checked against opencode.ai/docs/console/harnesses (2026-11-23); OpenRouter via its /models endpoint.
 export const PROVIDERS: Record<AccountKind, { native: Format; defaultBaseUrl?: string }> = {
   openrouter: { native: "openai", defaultBaseUrl: "https://openrouter.ai/api/v1" },
-  "opencode-zen": { native: "openai", defaultBaseUrl: "https://opencode.ai/zen/v1" },
-  "opencode-go": { native: "openai", defaultBaseUrl: "https://opencode.ai/zen/go/v1" },
+  "opencode-zen": { native: "openai", defaultBaseUrl: "https://opencode.ai/inference/openai/v1" },
+  "opencode-go": { native: "openai", defaultBaseUrl: "https://opencode.ai/inference/go/openai/v1" },
   "custom-openai": { native: "openai" },
   "custom-anthropic": { native: "anthropic" },
   "codex-oauth": { native: "openai" }, // deferred until OpenAI offers an official third-party login usable here; no executor yet
@@ -99,6 +99,7 @@ export async function callUpstream(
   if (stream && native === "openai") req.stream_options = { ...req.stream_options, include_usage: true };
 
   const headers: Record<string, string> = { "content-type": "application/json", ...oauthHeaders };
+  if (account.kind === "opencode-go") headers["x-opencode-session"] = account.id; // Go requires a stable session id on every request
   if (native === "anthropic") {
     if (key) headers["x-api-key"] = key;
     headers["anthropic-version"] = "2023-06-01";

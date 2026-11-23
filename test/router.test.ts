@@ -73,7 +73,7 @@ describe("routeWithFallback", () => {
     expect(res.status).toBe(200);
     expect(calls.map((c) => c.url)).toEqual([
       "https://openrouter.ai/api/v1/chat/completions",
-      "https://opencode.ai/zen/v1/chat/completions",
+      "https://opencode.ai/inference/openai/v1/chat/completions",
     ]);
     expect(JSON.parse(calls[0].init.body as string).model).toBe("m1");
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe("Bearer k-a");
