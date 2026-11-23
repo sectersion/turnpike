@@ -136,12 +136,17 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
 proxy.post("/chat/completions", (c) => handle(c, "openai"));
 proxy.post("/messages", (c) => handle(c, "anthropic"));
 
-// ponytail: provider models are not enumerable until accounts carry a model list; combos only.
+// Combos first, then every stored provider model as "<account>/<model>" (refreshed daily and on account create).
 proxy.get("/models", async (c) => {
   const allowed = c.get("key").allowedAccountIds;
-  const [accounts, combos] = await Promise.all([hub(c.env).listAccounts(false), hub(c.env).listCombos()]);
+  const [accounts, combos, models] = await Promise.all([hub(c.env).listAccounts(false), hub(c.env).listCombos(), hub(c.env).listModels()]);
   const data = combos
     .filter((cb) => resolveTargets(cb.name, accounts, combos, allowed).length)
     .map((cb) => ({ id: cb.name, object: "model", owned_by: "turnpike" }));
+  const usable = new Map(accounts.filter((a) => a.enabled && (!allowed || allowed.includes(a.id))).map((a) => [a.id, a.name]));
+  for (const m of models) {
+    const n = usable.get(m.accountId);
+    if (n) data.push({ id: `${n}/${m.model}`, object: "model", owned_by: n });
+  }
   return c.json({ object: "list", data });
 });

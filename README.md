@@ -6,7 +6,7 @@ A self-hosted LLM router for Cloudflare Workers. You add upstream provider accou
 |---|---|---|
 | `POST /v1/chat/completions` | OpenAI-compatible chat (streaming supported) | router key |
 | `POST /v1/messages` | Anthropic-compatible messages (streaming supported) | router key |
-| `GET /v1/models` | Lists the combos the key may use (not provider models) | router key |
+| `GET /v1/models` | Lists the combos the key may use, then every provider model as `<account>/<model>` (from the accounts the key allows) | router key |
 | `/` | Dashboard (static files in `public/`) | none for the page itself; the admin token is entered in it |
 | `/admin/*` | Admin API used by the dashboard | `Authorization: Bearer <ADMIN_TOKEN>` |
 | `GET /health` | Returns `{"ok":true}` | none |
@@ -141,7 +141,7 @@ Sharing a subscription login (GitHub Copilot) with other people through router k
 - The default base URLs for `openrouter`, `opencode-zen` and `opencode-go` were checked against provider docs on 2026-11-23, but no real chat request has been made to OpenCode Zen or Go. `opencode-go` sends the account id as the required `x-opencode-session` header. Set a base URL on the account if the defaults are wrong.
 - The Copilot client ID, token exchange and editor headers are undocumented and were taken from open-source clients (see the header comment in `src/oauth/copilot.ts`). No live Copilot call has been made; live OAuth has to be tried by hand once.
 - The dashboard has only a manual smoke script (`test/dashboard-smoke.md`). No real `wrangler deploy` has been run as part of writing this README.
-- `GET /v1/models` lists combos only.
+- Provider model lists are fetched from each account's `/models` when it is created, once a day, and on the Refresh button (`POST /admin/accounts/:id/models/refresh`). A provider whose `/models` needs a different auth or has no such route shows 0 models; combos still work with a hand-typed model.
 - Translation gaps when the client and upstream formats differ: `response_format`, `parallel_tool_calls`, `reasoning_effort` and `thinking` are dropped, thinking deltas are not translated, and `tool_result` `is_error` and images inside tool results are lost.
 - The OpenRouter price table is empty until the Durable Object's first alarm has fetched it (moments after the first request, retried every 5 minutes on failure). Until then capped keys get `limit: unpriced` for anything without a manual override.
 - Combos can be created and overwritten but not deleted; there is no delete route.

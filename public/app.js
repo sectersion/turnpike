@@ -5,6 +5,8 @@ const CUSTOM = ["custom-openai", "custom-anthropic"];
 const SUBSCRIPTION = ["copilot-oauth", "codex-oauth"];
 const app = document.getElementById("app");
 const signout = document.getElementById("signout");
+const nav = document.getElementById("nav");
+const side = document.getElementById("side");
 
 const getToken = () => { try { return sessionStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } };
 const setToken = (t) => { try { t ? sessionStorage.setItem(TOKEN_KEY, t) : sessionStorage.removeItem(TOKEN_KEY); } catch {} };
@@ -54,11 +56,14 @@ const lim = (n) => (n == null ? "none" : String(n));
 // ---------- login ----------
 function showLogin(msg = "") {
   signout.hidden = true;
+  side.hidden = true;
+  app.className = "center";
   stopPoll();
   const e = err();
   e.textContent = msg;
   const input = h("input", { id: "tok", type: "password", autocomplete: "off", required: true });
   app.replaceChildren(h("div", { class: "login" },
+    h("div", { class: "brand" }, h("span", { class: "logo", "aria-hidden": "true" }, "T"), "Turnpike"),
     h("h2", {}, "Admin sign-in"),
     h("form", { onsubmit: (ev) => { ev.preventDefault(); setToken(input.value.trim()); start(); } },
       field("Admin token", input), e, h("button", { class: "primary", type: "submit" }, "Continue"))));
@@ -68,19 +73,28 @@ signout.addEventListener("click", () => { setToken(""); showLogin(); });
 
 // ---------- shell ----------
 const TABS = { Accounts: accountsTab, Keys: keysTab, Combos: combosTab, Usage: usageTab };
+const SUBS = {
+  Accounts: "Upstream providers. Models are fetched from each provider automatically.",
+  Keys: "Router keys you hand out, with spend caps and account allow-lists.",
+  Combos: "Ordered fallback lists. Request a combo by name as the model.",
+  Usage: "Requests, tokens and spend per key and per account.",
+};
 function start() {
   if (!getToken()) return showLogin();
   signout.hidden = false;
+  side.hidden = false;
+  app.className = "";
   const panel = h("section", { role: "tabpanel" });
-  const tabs = h("div", { class: "tabs", role: "tablist" });
+  const tabs = nav;
+  tabs.replaceChildren();
   const select = (name) => {
     stopPoll();
     for (const b of tabs.children) b.setAttribute("aria-selected", String(b.textContent === name));
-    panel.replaceChildren();
+    panel.replaceChildren(h("h1", {}, name), h("p", { class: "sub" }, SUBS[name]));
     TABS[name](panel);
   };
   for (const name of Object.keys(TABS)) tabs.append(h("button", { role: "tab", type: "button", onclick: () => select(name) }, name));
-  app.replaceChildren(tabs, panel);
+  app.replaceChildren(panel);
   select("Accounts");
 }
 
@@ -93,16 +107,18 @@ async function accountsTab(root) {
   const list = h("div");
   const load = async () => {
     try {
-      const accts = await get("/admin/accounts");
-      list.replaceChildren(table(["Name", "Kind", "Enabled", "RPM", "TPM", "Monthly USD", "Actions"], accts.map((a) => accountRow(a, load, e))));
+      const [accts, models] = await Promise.all([get("/admin/accounts"), get("/admin/models")]);
+      const count = {};
+      for (const m of models) count[m.accountId] = (count[m.accountId] ?? 0) + 1;
+      list.replaceChildren(table(["Name", "Kind", "Enabled", "Models", "RPM", "TPM", "Monthly USD", "Actions"], accts.map((a) => accountRow(a, load, e, count[a.id] ?? 0)), [3]));
       showErr(e, null);
     } catch (x) { showErr(e, x); }
   };
-  root.append(h("h2", {}, "Accounts"), e, list, h("h2", {}, "Add account"), addAccountForm(load));
+  root.append(e, list, h("h2", {}, "Add account"), addAccountForm(load));
   load();
 }
 
-function accountRow(a, reload, e) {
+function accountRow(a, reload, e, nModels) {
   const num = (v, label) => h("input", { type: "number", min: "0", step: "any", value: v ?? "", placeholder: "none", "aria-label": `${label} for ${a.name}` });
   const rpm = num(a.rpm, "RPM"), tpm = num(a.tpm, "TPM"), usdI = num(a.monthlyUsd, "Monthly USD");
   const val = (i) => (i.value.trim() === "" ? null : Number(i.value));
@@ -110,6 +126,10 @@ function accountRow(a, reload, e) {
   return row([
     a.name, a.kind,
     h("button", { type: "button", "aria-pressed": String(a.enabled), onclick: () => patch({ enabled: !a.enabled }) }, a.enabled ? "Enabled" : "Disabled"),
+    h("span", { class: "row" }, String(nModels),
+      h("button", { type: "button", class: "ghost", title: "Fetch the model list from the provider", onclick: async () => {
+        try { await api("POST", `/admin/accounts/${encodeURIComponent(a.id)}/models/refresh`); await reload(); } catch (x) { showErr(e, x); }
+      } }, "Refresh")),
     rpm, tpm, usdI,
     h("span", { class: "row" },
       h("button", { type: "button", onclick: () => patch({ rpm: val(rpm), tpm: val(tpm), monthlyUsd: val(usdI) }) }, "Save limits"),
@@ -185,10 +205,10 @@ async function keysTab(root) {
       const names = Object.fromEntries(accts.map((a) => [a.id, a.name]));
       list.replaceChildren(table(["Name", "Daily USD", "Monthly USD", "RPM", "In flight", "Allowed accounts", "Status", "Actions"], keys.map((k) => row([
         k.name,
-        k.dailyUsd == null && k.monthlyUsd == null ? h("strong", {}, "UNCAPPED") : lim(k.dailyUsd), lim(k.monthlyUsd),
+        k.dailyUsd == null && k.monthlyUsd == null ? h("span", { class: "badge warn" }, "UNCAPPED") : lim(k.dailyUsd), lim(k.monthlyUsd),
         lim(k.rpm), lim(k.maxInFlight),
         k.allowedAccountIds ? k.allowedAccountIds.map((i) => names[i] ?? i).join(", ") || "none" : "all",
-        k.revoked ? "Revoked" : "Active",
+        h("span", { class: k.revoked ? "badge bad" : "badge ok" }, k.revoked ? "Revoked" : "Active"),
         k.revoked ? "" : h("button", { type: "button", class: "danger", onclick: async () => {
           if (!confirm(`Revoke key "${k.name}"? This cannot be undone.`)) return;
           try { await api("DELETE", `/admin/keys/${encodeURIComponent(k.id)}`); await load(); } catch (x) { showErr(e, x); }
@@ -244,7 +264,7 @@ async function keysTab(root) {
       h("label", { class: "inline" }, all, "All API-key accounts (not subscriptions)"),
       boxes.map(([a, b]) => h("label", { class: "inline" }, b, SUBSCRIPTION.includes(a.kind) ? `${a.name} (subscription)` : a.name))),
     h("button", { class: "primary", type: "submit" }, "Create key"));
-  root.append(h("h2", {}, "Keys"), e, secretBox, list, h("h2", {}, "Create key"), form);
+  root.append(e, secretBox, list, h("h2", {}, "Create key"), form);
   load();
 }
 
@@ -253,10 +273,13 @@ async function combosTab(root) {
   const e = err();
   const box = h("div");
   let accts = [];
+  const modelsBy = {};
   const load = async () => {
     try {
-      let combos;
-      [accts, combos] = await Promise.all([get("/admin/accounts"), get("/admin/combos")]);
+      let combos, models;
+      [accts, combos, models] = await Promise.all([get("/admin/accounts"), get("/admin/combos"), get("/admin/models")]);
+      for (const k of Object.keys(modelsBy)) delete modelsBy[k];
+      for (const m of models) (modelsBy[m.accountId] ??= []).push(m.model);
       box.replaceChildren(...combos.map(comboEditor), newCombo());
       showErr(e, null);
     } catch (x) { showErr(e, x); }
@@ -270,18 +293,21 @@ async function combosTab(root) {
         const sel = h("select", { "aria-label": `Account for target ${i + 1} of ${c.name}` }, accts.map((a) => h("option", { value: a.id }, a.name)));
         if (!accts.some((a) => a.id === t.accountId)) sel.prepend(h("option", { value: t.accountId }, `(missing) ${t.accountId}`));
         sel.value = t.accountId;
-        sel.addEventListener("change", () => { t.accountId = sel.value; });
-        const model = h("input", { value: t.model, "aria-label": `Model for target ${i + 1} of ${c.name}` });
+        const dl = h("datalist", { id: `dl-${c.name}-${i}` });
+        const fill = () => dl.replaceChildren(...(modelsBy[t.accountId] ?? []).map((m) => h("option", { value: m })));
+        fill();
+        sel.addEventListener("change", () => { t.accountId = sel.value; fill(); });
+        const model = h("input", { value: t.model, list: dl.id, placeholder: "start typing to search models", size: "36", "aria-label": `Model for target ${i + 1} of ${c.name}` });
         model.addEventListener("input", () => { t.model = model.value; });
         const mv = (d) => () => { [targets[i], targets[i + d]] = [targets[i + d], targets[i]]; draw(); };
-        return row([String(i + 1), sel, model, h("span", { class: "row" },
+        return row([String(i + 1), sel, h("span", {}, model, dl), h("span", { class: "row" },
           h("button", { type: "button", disabled: i === 0, onclick: mv(-1), "aria-label": `Move target ${i + 1} up` }, "Up"),
           h("button", { type: "button", disabled: i === targets.length - 1, onclick: mv(1), "aria-label": `Move target ${i + 1} down` }, "Down"),
           h("button", { type: "button", class: "danger", onclick: () => { targets.splice(i, 1); draw(); }, "aria-label": `Remove target ${i + 1}` }, "Remove"))]);
       })));
     };
     draw();
-    return h("section", {}, h("h2", {}, c.name), out, msg, h("div", { class: "row" },
+    return h("section", {}, h("h3", {}, c.name), out, msg, h("div", { class: "row" },
       h("button", { type: "button", disabled: !accts.length, onclick: () => { targets.push({ accountId: accts[0].id, model: "" }); draw(); } }, "Add target"),
       h("button", { type: "button", class: "primary", onclick: async () => {
         try {
@@ -301,7 +327,7 @@ async function combosTab(root) {
       name.value = "";
     } }, h("h2", {}, "New combo"), field("Combo name", name), h("button", { class: "primary", type: "submit" }, "Create combo"), m);
   };
-  root.append(h("h2", {}, "Combos"), e, box);
+  root.append(e, box);
   load();
 }
 
@@ -338,7 +364,7 @@ async function usageTab(root) {
     catch (x) { showErr(pm, x); }
   } }, field("Model", model), field("USD per 1M input tokens", inP), field("USD per 1M output tokens", outP),
     h("button", { class: "primary", type: "submit" }, "Set price"));
-  root.append(h("h2", {}, "Usage"), h("div", { class: "row" }, field("Period", period)), e, out, h("h2", {}, "Price override"), form, pm);
+  root.append(h("div", { class: "row" }, field("Period", period)), e, out, h("h2", {}, "Price override"), form, pm);
   load();
 }
 

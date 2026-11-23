@@ -8,11 +8,14 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-  <h1>Turnpike</h1>
-  <button id="signout" type="button" hidden>Sign out</button>
-</header>
-<main id="app"><noscript>This dashboard needs JavaScript.</noscript></main>
+<div class="shell">
+  <aside id="side">
+    <div class="brand"><span class="logo" aria-hidden="true">T</span>Turnpike</div>
+    <nav id="nav" role="tablist" aria-label="Sections"></nav>
+    <div class="side-foot"><button id="signout" type="button" class="ghost" hidden>Sign out</button></div>
+  </aside>
+  <main id="app"><noscript>This dashboard needs JavaScript.</noscript></main>
+</div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
