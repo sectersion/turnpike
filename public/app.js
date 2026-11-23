@@ -2,6 +2,7 @@
 const TOKEN_KEY = "turnpike_admin_token";
 const KINDS = ["openrouter", "opencode-zen", "opencode-go", "custom-openai", "custom-anthropic", "copilot-oauth"];
 const CUSTOM = ["custom-openai", "custom-anthropic"];
+const SUBSCRIPTION = ["copilot-oauth", "codex-oauth"];
 const app = document.getElementById("app");
 const signout = document.getElementById("signout");
 
@@ -182,8 +183,10 @@ async function keysTab(root) {
     try {
       const keys = await get("/admin/keys");
       const names = Object.fromEntries(accts.map((a) => [a.id, a.name]));
-      list.replaceChildren(table(["Name", "Daily USD", "Monthly USD", "Allowed accounts", "Status", "Actions"], keys.map((k) => row([
-        k.name, lim(k.dailyUsd), lim(k.monthlyUsd),
+      list.replaceChildren(table(["Name", "Daily USD", "Monthly USD", "RPM", "In flight", "Allowed accounts", "Status", "Actions"], keys.map((k) => row([
+        k.name,
+        k.dailyUsd == null && k.monthlyUsd == null ? h("strong", {}, "UNCAPPED") : lim(k.dailyUsd), lim(k.monthlyUsd),
+        lim(k.rpm), lim(k.maxInFlight),
         k.allowedAccountIds ? k.allowedAccountIds.map((i) => names[i] ?? i).join(", ") || "none" : "all",
         k.revoked ? "Revoked" : "Active",
         k.revoked ? "" : h("button", { type: "button", class: "danger", onclick: async () => {
@@ -199,15 +202,26 @@ async function keysTab(root) {
   const name = h("input", { required: true });
   const daily = h("input", { type: "number", min: "0", step: "any" });
   const monthly = h("input", { type: "number", min: "0", step: "any" });
-  const all = h("input", { type: "checkbox", checked: true });
-  const boxes = accts.map((a) => [a, h("input", { type: "checkbox", disabled: true })]);
-  all.addEventListener("change", () => boxes.forEach(([, b]) => { b.disabled = all.checked; }));
+  const unlimited = h("input", { type: "checkbox" });
+  // Safe defaults; clear a field for no limit.
+  const rpmI = h("input", { type: "number", min: "0", step: "1", value: "30", placeholder: "none" });
+  const inflight = h("input", { type: "number", min: "0", step: "1", value: "4", placeholder: "none" });
+  // Nothing is ticked by default. "All API-key accounts" ticks the current non-subscription accounts;
+  // subscription (Copilot) accounts must be ticked one by one. The key gets an explicit list, never "all".
+  const all = h("input", { type: "checkbox" });
+  const boxes = accts.map((a) => [a, h("input", { type: "checkbox" })]);
+  all.addEventListener("change", () => boxes.forEach(([a, b]) => { if (!SUBSCRIPTION.includes(a.kind)) b.checked = all.checked; }));
   const form = h("form", { onsubmit: async (ev) => {
     ev.preventDefault();
     const b = { name: name.value };
     if (daily.value !== "") b.dailyUsd = Number(daily.value);
     if (monthly.value !== "") b.monthlyUsd = Number(monthly.value);
-    if (!all.checked) b.allowedAccountIds = boxes.filter(([, c]) => c.checked).map(([a]) => a.id);
+    if (b.dailyUsd === undefined && b.monthlyUsd === undefined && !unlimited.checked)
+      return showErr(e, new Error("Set a daily or monthly USD cap, or tick \"No USD cap\"."));
+    b.rpm = rpmI.value === "" ? null : Number(rpmI.value);
+    b.maxInFlight = inflight.value === "" ? null : Number(inflight.value);
+    b.allowedAccountIds = boxes.filter(([, c]) => c.checked).map(([a]) => a.id);
+    if (!b.allowedAccountIds.length) return showErr(e, new Error("Tick at least one account."));
     try {
       const { data } = await api("POST", "/admin/keys", b);
       const copy = h("button", { type: "button", onclick: async () => {
@@ -219,13 +233,16 @@ async function keysTab(root) {
       name.value = "";
       daily.value = "";
       monthly.value = "";
+      unlimited.checked = false;
       showErr(e, null);
       await load();
     } catch (x) { showErr(e, x); }
   } }, field("Name", name), field("Daily USD cap", daily), field("Monthly USD cap", monthly),
+    h("label", { class: "inline" }, unlimited, "No USD cap (unlimited spend)"),
+    field("Requests per minute (blank: unlimited)", rpmI), field("Max in flight (blank: unlimited)", inflight),
     h("fieldset", {}, h("legend", {}, "Allowed accounts"),
-      h("label", { class: "inline" }, all, "All accounts"),
-      boxes.map(([a, b]) => h("label", { class: "inline" }, b, a.name))),
+      h("label", { class: "inline" }, all, "All API-key accounts (not subscriptions)"),
+      boxes.map(([a, b]) => h("label", { class: "inline" }, b, SUBSCRIPTION.includes(a.kind) ? `${a.name} (subscription)` : a.name))),
     h("button", { class: "primary", type: "submit" }, "Create key"));
   root.append(h("h2", {}, "Keys"), e, secretBox, list, h("h2", {}, "Create key"), form);
   load();

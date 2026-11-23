@@ -14,6 +14,8 @@ export type RouterKey = {
   monthlyUsd: number | null;
   allowedAccountIds: string[] | null;
   revoked: boolean;
+  rpm: number | null; // requests per rolling minute for this key
+  maxInFlight: number | null; // concurrent unsettled requests for this key
 };
 
 export type AccountSecret =

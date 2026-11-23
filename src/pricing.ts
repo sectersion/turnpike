@@ -7,7 +7,9 @@ export function priceFor(model: string, overrides: Record<string, Price>, orTabl
   return k ? orTable[k] : null;
 }
 
-export const costUsd = (p: Price, inTokens: number, outTokens: number) => (inTokens / 1e6) * p.inPerM + (outTokens / 1e6) * p.outPerM;
+// Anthropic prompt caching: writes cost 1.25x the input price, reads 0.1x.
+export const costUsd = (p: Price, inTokens: number, outTokens: number, cacheWrite = 0, cacheRead = 0) =>
+  ((inTokens + 1.25 * cacheWrite + 0.1 * cacheRead) / 1e6) * p.inPerM + (outTokens / 1e6) * p.outPerM;
 
 // Never throws: any failure yields {} so the caller keeps its cached table.
 export async function refreshOpenRouterPrices(fetchFn: typeof fetch = fetch): Promise<Record<string, Price>> {

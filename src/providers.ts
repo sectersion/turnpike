@@ -18,8 +18,55 @@ export const PROVIDERS: Record<AccountKind, { native: Format; defaultBaseUrl?: s
   "custom-openai": { native: "openai" },
   "custom-anthropic": { native: "anthropic" },
   "codex-oauth": { native: "openai" }, // deferred until OpenAI offers an official third-party login usable here; no executor yet
-  "copilot-oauth": { native: "openai", defaultBaseUrl: "https://api.githubcopilot.com" }, // verified: see src/oauth/copilot.ts
+  "copilot-oauth": { native: "openai", defaultBaseUrl: "https://api.githubcopilot.com" }, // unverified: no live call made, see src/oauth/copilot.ts
 };
+
+// Output-token limit: DEFAULT_OUT when the client sends none, never above MAX_OUT. The same value is
+// reserved and sent upstream (the Hub may lower it further to fit a USD cap).
+export const DEFAULT_OUT = 4096;
+export const MAX_OUT = 32_000;
+export const outCap = (body: any): number => {
+  const r = body?.max_completion_tokens ?? body?.max_tokens;
+  return typeof r === "number" && Number.isFinite(r) && r >= 1 ? Math.min(Math.floor(r), MAX_OUT) : DEFAULT_OUT;
+};
+
+// Request fields forwarded upstream; everything else (OpenRouter models/route/provider/plugins,
+// service_tier, web_search_options, audio, mcp_servers, ...) is dropped because it can bill outside the price model.
+const ALLOWED: Record<Format, string[]> = {
+  openai: [
+    "model", "messages", "max_tokens", "max_completion_tokens", "temperature", "top_p", "stop", "stream", "stream_options",
+    "tools", "tool_choice", "parallel_tool_calls", "response_format", "seed", "frequency_penalty", "presence_penalty",
+    "logit_bias", "logprobs", "top_logprobs", "user", "reasoning_effort", "n",
+  ],
+  anthropic: ["model", "messages", "system", "max_tokens", "temperature", "top_p", "top_k", "stop_sequences", "stream", "tools", "tool_choice", "thinking", "metadata"],
+};
+
+// Server-side tools (web search, code execution, computer use...) bill separately: refuse them.
+export function badTools(format: Format, body: any): string | null {
+  const tools = body?.tools;
+  if (tools === undefined) return null;
+  if (!Array.isArray(tools)) return "tools must be an array";
+  const ok = (t: any) => (format === "openai" ? t?.type === "function" : t?.type === undefined || t?.type === "custom");
+  return tools.every(ok) ? null : `only ${format === "openai" ? "function" : "custom (client)"} tools are supported; server tools are refused`;
+}
+
+// Allow-listed copy of the client body with the output limit set to maxOut and n forced to 1.
+export function sanitize(format: Format, body: any, maxOut: number): any {
+  const out: any = {};
+  for (const k of ALLOWED[format]) if (body?.[k] !== undefined) out[k] = body[k];
+  if (format === "openai") {
+    if (out.max_completion_tokens !== undefined) out.max_completion_tokens = maxOut;
+    else out.max_tokens = maxOut;
+    if (out.n !== undefined) out.n = 1;
+  } else {
+    out.max_tokens = maxOut;
+    // Anthropic requires budget_tokens < max_tokens (minimum 1024).
+    const b = out.thinking?.budget_tokens;
+    if (typeof b === "number" && b >= maxOut) out.thinking = maxOut > 1024 ? { ...out.thinking, budget_tokens: maxOut - 1 } : undefined;
+    if (out.thinking === undefined) delete out.thinking;
+  }
+  return out;
+}
 
 const apiKey = (a: Account): string =>
   typeof a.secret === "string" ? a.secret : "apiKey" in a.secret ? String(a.secret.apiKey) : "";
@@ -33,6 +80,7 @@ export async function callUpstream(
   body: unknown,
   fetchFn: typeof fetch,
   authHeaders?: AuthHeaders,
+  maxOut: number = outCap(body),
 ): Promise<Response> {
   const { account, model } = t;
   const oauth = account.kind.endsWith("-oauth");
@@ -45,7 +93,7 @@ export async function callUpstream(
   if (!oauth && !key && account.kind !== "custom-openai" && account.kind !== "custom-anthropic") throw new Error("account has no api key");
   const stream = (body as { stream?: unknown }).stream === true;
 
-  let req: any = { ...(body as object), model };
+  let req: any = { ...sanitize(format, body, maxOut), model };
   if (format !== native) req = { ...(format === "openai" ? openaiReqToAnthropic(req) : anthropicReqToOpenai(req)), model };
 
   if (stream && native === "openai") req.stream_options = { ...req.stream_options, include_usage: true };
@@ -60,6 +108,7 @@ export async function callUpstream(
     method: "POST",
     headers,
     body: JSON.stringify(req),
+    redirect: "manual", // a cross-origin redirect would carry x-api-key / Copilot headers along
   });
   if (!res.ok || format === native) return res;
 
