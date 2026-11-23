@@ -35,11 +35,13 @@ const form = (url: string, body: Record<string, string>) =>
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded", "User-Agent": UA },
     body: new URLSearchParams(body).toString(),
+    redirect: "manual",
   });
 
 async function exchange(gh: string): Promise<OAuthTokens> {
   const r = await fetch("https://api.github.com/copilot_internal/v2/token", {
     headers: { Accept: "application/json", Authorization: `token ${gh}`, ...EDITOR },
+    redirect: "manual",
   });
   // status lets the Hub pick a cooldown (rejected grant vs transient failure).
   if (!r.ok) throw Object.assign(new Error(`copilot token exchange failed: HTTP ${r.status}`), { status: r.status });

@@ -108,6 +108,7 @@ export async function callUpstream(
     method: "POST",
     headers,
     body: JSON.stringify(req),
+    redirect: "manual", // a cross-origin redirect would carry x-api-key / Copilot headers along
   });
   if (!res.ok || format === native) return res;
 

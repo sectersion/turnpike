@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { hub } from "./hub-client";
 import { badTools, outCap, type Format, type Target } from "./providers";
-import { explainEmpty, resolveTargets, routeWithFallback } from "./router";
+import { explainEmpty, isAccountFailure, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
 import { usageTap } from "./translate/stream";
 import type { Account } from "./types";
@@ -12,6 +12,30 @@ export const proxy = new Hono<AppEnv>();
 
 const fail = (format: Format, status: number, type: string, message: string) =>
   Response.json(format === "anthropic" ? { type: "error", error: { type, message } } : { error: { message, type } }, { status });
+
+const ACCOUNT_COOLDOWN_MS = 15 * 60_000;
+const PASS_HEADERS = ["content-type", "retry-after", "cache-control"];
+const pickHeaders = (h: Headers) => {
+  const out = new Headers();
+  for (const k of PASS_HEADERS) {
+    const v = h.get(k);
+    if (v) out.set(k, v);
+  }
+  return out;
+};
+
+// What a friend sees for a failed upstream: validation bodies pass, everything else is generic so no
+// account, org, balance or key detail leaks. 401/402/403/3xx would read as "your router key is bad": 502.
+function upstreamError(format: Format, res: Response): Response {
+  const s = res.status;
+  if (s === 400 || s === 422) return new Response(res.body, { status: s, headers: pickHeaders(res.headers) });
+  void res.body?.cancel().catch(() => {});
+  if (isAccountFailure(s) || s < 400) return fail(format, 502, "api_error", "upstream account error");
+  const out = fail(format, s, s === 429 ? "rate_limit" : "api_error", `upstream error (HTTP ${s})`);
+  const ra = res.headers.get("retry-after");
+  if (ra) out.headers.set("retry-after", ra);
+  return out;
+}
 
 // Rough input-token estimate for reservations: ~4 chars per token.
 const jsonLen = (v: unknown) => (JSON.stringify(v) ?? "").length;
@@ -69,8 +93,8 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
     fetch,
     (t, r, rid) => {
       attempts.push({ t, r, rid });
-      if (r instanceof Response && r.status === 429) {
-        const until = Date.now() + retryAfterMs(r.headers.get("retry-after"));
+      if (r instanceof Response && (r.status === 429 || isAccountFailure(r.status))) {
+        const until = Date.now() + (r.status === 429 ? retryAfterMs(r.headers.get("retry-after")) : ACCOUNT_COOLDOWN_MS);
         bg(() => h.setCooldown(t.account.id, until));
       }
     },
@@ -81,6 +105,7 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
   // Every attempt reached (or tried to reach) upstream: all but a successful winner are released, still counting toward rpm.
   for (const a of attempts) if (a.rid && (a !== win || !res.ok)) bg(() => h.release(a.rid!));
   if (!win && gated) return fail(format, 429, "rate_limit", `limit: ${gated}`);
+  if (win && !res.ok) return upstreamError(format, res);
   if (!res.ok || !win?.rid) return res;
   const winner = win.t;
   const reservationId = win.rid;
@@ -91,11 +116,11 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
   if (body.stream === true && res.body) {
     // bg never throws: usageTap calls this from flush/cancel.
     const tapped = res.body.pipeThrough(usageTap((u) => bg(() => rec(u))));
-    return new Response(tapped, { status: res.status, headers: res.headers });
+    return new Response(tapped, { status: res.status, headers: pickHeaders(res.headers) });
   }
   const clone = res.clone();
   bg(() => clone.json().then((j) => rec(extractUsage(j)), () => rec(null)));
-  return res;
+  return new Response(res.body, { status: res.status, headers: pickHeaders(res.headers) });
 }
 
 proxy.post("/chat/completions", (c) => handle(c, "openai"));

@@ -61,9 +61,9 @@ describe("resolveTargets", () => {
 });
 
 describe("isFallbackEligible", () => {
-  it("408/429/5xx only", () => {
-    expect([408, 429, 500, 503].every(isFallbackEligible)).toBe(true);
-    expect([200, 400, 401, 404].some(isFallbackEligible)).toBe(false);
+  it("3xx, 401/402/403 (account failures), 408, 429 and 5xx", () => {
+    expect([302, 401, 402, 403, 408, 429, 500, 503].every(isFallbackEligible)).toBe(true);
+    expect([200, 400, 404, 422].some(isFallbackEligible)).toBe(false);
   });
 });
 

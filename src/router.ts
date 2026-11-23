@@ -25,7 +25,9 @@ export function resolveTargets(model: string, accounts: Account[], combos: Combo
 export const explainEmpty = (model: string, accounts: Account[], combos: Combo[]): "unknown_model" | "not_allowed" =>
   expand(model, accounts, combos).length ? "not_allowed" : "unknown_model";
 
-export const isFallbackEligible = (status: number) => status === 408 || status === 429 || status >= 500;
+// 3xx (redirects are never followed) and 401/402/403 are account-level failures: try the next target.
+export const isAccountFailure = (s: number) => (s >= 300 && s < 400) || s === 401 || s === 402 || s === 403;
+export const isFallbackEligible = (s: number) => isAccountFailure(s) || s === 408 || s === 429 || s >= 500;
 
 export async function routeWithFallback(
   targets: Target[],
