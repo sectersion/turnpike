@@ -41,7 +41,8 @@ async function exchange(gh: string): Promise<OAuthTokens> {
   const r = await fetch("https://api.github.com/copilot_internal/v2/token", {
     headers: { Accept: "application/json", Authorization: `token ${gh}`, ...EDITOR },
   });
-  if (!r.ok) throw new Error(`copilot token exchange failed: HTTP ${r.status}`);
+  // status lets the Hub pick a cooldown (rejected grant vs transient failure).
+  if (!r.ok) throw Object.assign(new Error(`copilot token exchange failed: HTTP ${r.status}`), { status: r.status });
   const j = (await r.json()) as { token?: unknown; expires_at?: unknown };
   if (typeof j.token !== "string" || typeof j.expires_at !== "number") throw new Error("copilot token exchange returned no token");
   return { accessToken: j.token, refreshToken: gh, expiresAt: j.expires_at * 1000 };

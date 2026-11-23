@@ -54,7 +54,7 @@ describe("limits", () => {
     expect(await capped.r(T, "no-such-model-zz9")).toEqual({ ok: false, reason: "unpriced" });
     const free = await setup();
     expect((await free.r(T, "no-such-model-zz9")).ok).toBe(true);
-    const sub = await setup({ monthlyUsd: 100 }, { kind: "claude-oauth" });
+    const sub = await setup({ monthlyUsd: 100 }, { kind: "codex-oauth" });
     expect((await sub.r(T, "no-such-model-zz9")).ok).toBe(true);
   });
 
