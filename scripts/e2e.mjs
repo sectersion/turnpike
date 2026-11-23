@@ -286,12 +286,12 @@ await check("routing: unknown model -> 404 in client's own error style", async (
   const b = await ant(state.main.secret, { model: `nope-${T}`, max_tokens: 5, messages: [{ role: "user", content: "hi" }] });
   assert.equal(b.status, 404); assert.deepEqual(b.json, { type: "error", error: { type: "not_found_error", message: `unknown model: nope-${T}` } });
 });
-await check("routing: allow-list excluding the account -> 403 (both styles), allowed account works", async () => {
+await check("routing: allow-list excluding the account -> 404 (both styles, no model probing), allowed account works", async () => {
   const k = await mkKey("allow", { allowedAccountIds: [state.anth] });
   const a = await oai(k.secret, msg("hi", { model: CO }));
-  assert.equal(a.status, 403); assert.equal(a.json.error.type, "permission_error");
+  assert.equal(a.status, 404); assert.equal(a.json.error.type, "not_found_error");
   const b = await ant(k.secret, { model: CO, max_tokens: 5, messages: [{ role: "user", content: "hi" }] });
-  assert.equal(b.status, 403); assert.equal(b.json.type, "error");
+  assert.equal(b.status, 404); assert.equal(b.json.type, "error");
   assert.equal((await oai(k.secret, msg("hi", { model: CA, max_tokens: 5 }))).status, 200);
 });
 
@@ -311,7 +311,7 @@ await check("limits: unpriced model refused for capped key, allowed for uncapped
   const k = await mkKey("capped", { dailyUsd: 100 });
   await stubClear();
   const r = await oai(k.secret, msg("hi", { model: `c-unp-${T}`, max_tokens: 10 }));
-  assert.equal(r.status, 429); assert.equal(r.json.error.message, "limit: unpriced");
+  assert.equal(r.status, 400); assert.ok(r.json.error.message.startsWith("limit: unpriced"));
   assert.equal((await stubReqs()).length, 0);
   assert.equal((await oai(state.main.secret, msg("hi", { model: `c-unp-${T}`, max_tokens: 10 }))).status, 200);
 });
