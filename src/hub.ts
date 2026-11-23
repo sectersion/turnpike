@@ -3,6 +3,7 @@ import { newSecret, sha256Hex } from "./crypto";
 import { costUsd, priceFor, refreshOpenRouterPrices, type Price } from "./pricing";
 import type { Account, AccountKind, Combo, RouterKey } from "./types";
 import type { Env } from "./env";
+import { getProvider, type OAuthTokens } from "./oauth";
 
 export type LimitReason = "key_daily" | "key_monthly" | "account_monthly" | "rpm" | "tpm" | "cooldown" | "unpriced";
 export type UsageRow = { id: string; requests: number; inTokens: number; outTokens: number; costUsd: number };
@@ -23,6 +24,7 @@ const MINUTE = 60_000;
 const LEAK_MS = 10 * MINUTE;
 const DAY = 86_400_000;
 const RETRY_MS = 5 * MINUTE; // empty price cache after a failed refresh
+const SKEW_MS = 60_000; // refresh OAuth tokens this long before they expire
 const SUBSCRIPTION = new Set<AccountKind>(["claude-oauth", "codex-oauth", "copilot-oauth"]);
 
 type KeyRow = {
@@ -71,6 +73,7 @@ export class Hub extends DurableObject<Env> {
 
   private orTable: Record<string, Price> = {};
   private alarmChecked = false;
+  private refreshing = new Map<string, Promise<OAuthTokens>>();
 
   private priceTable(t: "prices" | "price_overrides"): Record<string, Price> {
     const out: Record<string, Price> = {};
@@ -259,6 +262,32 @@ export class Hub extends DurableObject<Env> {
 
   async getAccount(id: string): Promise<Account | null> {
     return this.accountSync(id);
+  }
+
+  // Single-flight per account; rotated tokens are written before any caller sees them. A failed
+  // refresh leaves the stored tokens untouched. Never log tokens here.
+  async getFreshToken(accountId: string): Promise<OAuthTokens> {
+    const acc = this.accountSync(accountId);
+    const t = acc?.secret;
+    if (!acc || acc.authType !== "oauth" || typeof t !== "object" || !("accessToken" in t)) throw new Error("not an oauth account");
+    if (t.expiresAt === undefined || t.expiresAt - SKEW_MS > Date.now()) return t;
+    const inflight = this.refreshing.get(accountId);
+    if (inflight) return inflight;
+    const p = (async () => {
+      const provider = getProvider(acc.kind);
+      if (!provider) throw new Error(`no oauth provider for ${acc.kind}`);
+      let next: OAuthTokens;
+      try {
+        next = await provider.refresh(t);
+      } catch (e) {
+        throw new Error(`token refresh failed for account ${accountId}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      const cur = this.accountSync(accountId); // re-read: don't clobber edits made during the refresh
+      if (cur) this.sql.exec("UPDATE accounts SET data = ? WHERE id = ?", JSON.stringify({ ...cur, secret: next }), accountId);
+      return next;
+    })().finally(() => this.refreshing.delete(accountId));
+    this.refreshing.set(accountId, p);
+    return p;
   }
 
   async deleteAccount(id: string): Promise<void> {
