@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { hub } from "./hub-client";
+import { getProvider } from "./oauth";
 import type { Format, Target } from "./providers";
 import { explainEmpty, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
 import { usageTap } from "./translate/stream";
+import type { Account } from "./types";
 import { recordUsage } from "./usage";
 
 export const proxy = new Hono<AppEnv>();
@@ -56,6 +58,11 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
     if (!g.ok) gated ??= g.reason;
     return g;
   };
+  const authHeaders = async (a: Account) => {
+    const p = getProvider(a.kind);
+    if (!p) throw new Error("oauth executor not implemented");
+    return p.headers(await h.getFreshToken(a.id));
+  };
   const attempts: { t: Target; r: Response | Error; rid?: string }[] = [];
   const res = await routeWithFallback(
     targets,
@@ -70,6 +77,7 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
       }
     },
     gate,
+    authHeaders,
   );
   const win = attempts.find((a) => a.r === res);
   // Every attempt reached (or tried to reach) upstream: all but a successful winner are released, still counting toward rpm.

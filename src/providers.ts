@@ -19,20 +19,31 @@ export const PROVIDERS: Record<AccountKind, { native: Format; defaultBaseUrl?: s
   "custom-anthropic": { native: "anthropic" },
   "claude-oauth": { native: "anthropic" },
   "codex-oauth": { native: "openai" },
-  "copilot-oauth": { native: "openai" },
+  "copilot-oauth": { native: "openai", defaultBaseUrl: "https://api.githubcopilot.com" }, // verified: see src/oauth/copilot.ts
 };
 
 const apiKey = (a: Account): string =>
   typeof a.secret === "string" ? a.secret : "apiKey" in a.secret ? String(a.secret.apiKey) : "";
 
-export async function callUpstream(t: Target, format: Format, body: unknown, fetchFn: typeof fetch): Promise<Response> {
+export type AuthHeaders = (account: Account) => Promise<Record<string, string>>;
+
+// authHeaders supplies the auth for -oauth kinds (it may throw, e.g. on a failed token refresh).
+export async function callUpstream(
+  t: Target,
+  format: Format,
+  body: unknown,
+  fetchFn: typeof fetch,
+  authHeaders?: AuthHeaders,
+): Promise<Response> {
   const { account, model } = t;
-  if (account.kind.endsWith("-oauth")) throw new Error("oauth executor not implemented");
+  const oauth = account.kind.endsWith("-oauth");
+  if (oauth && !authHeaders) throw new Error("oauth executor not implemented");
+  const oauthHeaders = oauth ? await authHeaders!(account) : {};
   const { native, defaultBaseUrl } = PROVIDERS[account.kind];
   const base = (account.baseUrl ?? defaultBaseUrl ?? "").replace(/\/+$/, "");
   if (!base) throw new Error("account has no baseUrl");
-  const key = apiKey(account);
-  if (!key && account.kind !== "custom-openai" && account.kind !== "custom-anthropic") throw new Error("account has no api key");
+  const key = oauth ? "" : apiKey(account);
+  if (!oauth && !key && account.kind !== "custom-openai" && account.kind !== "custom-anthropic") throw new Error("account has no api key");
   const stream = (body as { stream?: unknown }).stream === true;
 
   let req: any = { ...(body as object), model };
@@ -40,7 +51,7 @@ export async function callUpstream(t: Target, format: Format, body: unknown, fet
 
   if (stream && native === "openai") req.stream_options = { ...req.stream_options, include_usage: true };
 
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = { "content-type": "application/json", ...oauthHeaders };
   if (native === "anthropic") {
     if (key) headers["x-api-key"] = key;
     headers["anthropic-version"] = "2023-06-01";

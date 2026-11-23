@@ -1,4 +1,4 @@
-import { callUpstream, type Format, type Target } from "./providers";
+import { callUpstream, type AuthHeaders, type Format, type Target } from "./providers";
 import type { Account, Combo } from "./types";
 
 export type { Target };
@@ -34,6 +34,7 @@ export async function routeWithFallback(
   fetchFn: typeof fetch,
   onAttempt?: (t: Target, res: Response | Error, reservationId?: string) => void,
   gate?: (t: Target) => Promise<Gate>,
+  authHeaders?: AuthHeaders,
 ): Promise<Response> {
   if (!targets.length) return err(404, "no matching model");
   let last: Response | Error = new Error("no attempt");
@@ -56,7 +57,7 @@ export async function routeWithFallback(
     }
     if (last instanceof Response) await last.body?.cancel(); // superseded failed attempt
     try {
-      last = await callUpstream(t, format, body, fetchFn);
+      last = await callUpstream(t, format, body, fetchFn, authHeaders);
     } catch (e) {
       last = e instanceof Error ? e : new Error(String(e));
     }
