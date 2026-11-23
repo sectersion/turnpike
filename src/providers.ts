@@ -96,6 +96,7 @@ export async function callUpstream(
   let req: any = { ...sanitize(format, body, maxOut), model };
   if (format !== native) req = { ...(format === "openai" ? openaiReqToAnthropic(req) : anthropicReqToOpenai(req)), model };
 
+  req.stream = stream; // some upstreams (10router) stream by default when the field is absent
   if (stream && native === "openai") req.stream_options = { ...req.stream_options, include_usage: true };
 
   const headers: Record<string, string> = { "content-type": "application/json", ...oauthHeaders };
