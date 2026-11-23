@@ -1,3 +1,4 @@
+import { barList, card, fmtDay, fmtHour, fmtNum, fmtTipTime, fmtUsd, lineChart, sparkline, tableView } from "./charts.js";
 // Vanilla dashboard. All API data goes in via textContent / value, never as markup.
 const TOKEN_KEY = "turnpike_admin_token";
 const KINDS = ["openrouter", "opencode-zen", "opencode-go", "custom-openai", "custom-anthropic", "copilot-oauth"];
@@ -332,39 +333,109 @@ async function combosTab(root) {
 }
 
 // ---------- usage ----------
+const HOUR = 3_600_000, DAYMS = 86_400_000;
 const PERIODS = {
-  "Today": () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()); },
-  "Last 7 days": () => Date.now() - 7 * 86400000,
-  "This month": () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); },
+  "Today": { since: () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()); }, bucket: HOUR },
+  "Last 7 days": { since: () => Date.now() - 7 * DAYMS, bucket: DAYMS },
+  "Last 30 days": { since: () => Date.now() - 30 * DAYMS, bucket: DAYMS },
+  "This month": { since: () => { const d = new Date(); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1); }, bucket: DAYMS },
 };
+const METRICS = {
+  Requests: { f: (r) => r.requests, fmt: fmtNum },
+  Tokens: { f: (r) => (r.inTokens ?? 0) + (r.outTokens ?? 0), fmt: fmtNum },
+  Spend: { f: (r) => r.costUsd ?? 0, fmt: fmtUsd },
+};
+// Zero-filled series over [since, end): the API omits empty buckets.
+const fill = (rows, since, end, b) => {
+  const by = new Map(rows.map((r) => [r.t, r]));
+  const out = [];
+  for (let t = since; t < end; t += b) out.push(by.get(t) ?? { t, requests: 0, inTokens: 0, outTokens: 0, costUsd: 0 });
+  return out;
+};
+const sum = (a, k) => a.reduce((x, r) => x + (r[k] ?? 0), 0);
+const delta = (cur, prev) => (prev > 0 ? `${cur >= prev ? "▲" : "▼"} ${Math.abs(Math.round(((cur - prev) / prev) * 100))}% vs prior period` : cur > 0 ? "new this period" : "no change");
+
 async function usageTab(root) {
   const e = err();
-  const out = h("div");
-  const period = h("select", { id: "period" }, Object.keys(PERIODS).map((p) => h("option", { value: p }, p)));
-  period.value = "This month";
+  const out = h("div", { class: "frame" });
+  const period = h("select", { id: "period", "aria-label": "Period" }, Object.keys(PERIODS).map((p) => h("option", { value: p }, p)));
+  period.value = "Last 7 days";
+  let metric = "Requests";
+  let data = null;
+
+  const render = () => {
+    const { cur, prev, u, b, names } = data;
+    const xs = cur.map((r) => r.t);
+    const total = (k) => sum(cur, k), ptotal = (k) => sum(prev, k);
+    if (!total("requests")) return out.replaceChildren(h("div", { class: "card empty" }, h("strong", {}, "No requests in this period"), "Usage appears here once a router key makes a request."));
+    const tile = (label, k, fmt) => h("div", { class: "tile" }, h("span", { class: "lab" }, label), h("span", { class: "val" }, fmt(total(k))),
+      h("div", { class: "row2" }, h("span", { class: "delta" }, delta(total(k), ptotal(k))), sparkline(cur.slice(-12).map((r) => r[k] ?? 0))));
+    const fmtX = b < DAYMS ? fmtHour : fmtDay;
+    const single = (title, sub, k, fmt, nm) => {
+      const host = h("div");
+      lineChart(host, { xs, series: [{ name: nm, cls: "c1", values: cur.map((r) => r[k] ?? 0), fmt }], fmtX, fmtTip: (t) => fmtTipTime(t, b), fmtY: fmt, label: `${title} over time` });
+      return card(title, sub, host, () => tableView(["Time (UTC)", nm], cur.map((r) => [fmtTipTime(r.t, b), fmt(r[k] ?? 0)])));
+    };
+    const tokHost = h("div");
+    const tokChart = h("div", {}, h("div", { class: "legend" }, h("span", {}, h("i", { class: "key c1" }), "Input"), h("span", {}, h("i", { class: "key c2" }), "Output")), tokHost);
+    lineChart(tokHost, { xs, stacked: true, series: [{ name: "Input", cls: "c1", values: cur.map((r) => r.inTokens), fmt: fmtNum }, { name: "Output", cls: "c2", values: cur.map((r) => r.outTokens), fmt: fmtNum }],
+      fmtX, fmtTip: (t) => fmtTipTime(t, b), fmtY: fmtNum, label: "Tokens over time, input and output" });
+    const tokens = card("Tokens", "Input and output, stacked", tokChart, () => tableView(["Time (UTC)", "Input", "Output"], cur.map((r) => [fmtTipTime(r.t, b), fmtNum(r.inTokens), fmtNum(r.outTokens)])));
+
+    const M = METRICS[metric];
+    const ranked = (rows, name) => {
+      const all = rows.map((r) => ({ name: name(r.id), value: M.f(r), r })).filter((r) => r.value > 0).sort((a, z) => z.value - a.value);
+      const top = all.slice(0, 8), rest = all.slice(8);
+      if (rest.length) {
+        const rr = rest.map((q) => q.r);
+        top.push({ name: `Other (${rest.length})`, value: rest.reduce((x, r) => x + r.value, 0), r: { requests: sum(rr, "requests"), inTokens: sum(rr, "inTokens"), outTokens: sum(rr, "outTokens"), costUsd: sum(rr, "costUsd") } });
+      }
+      return top.map((x) => ({ name: x.name, value: x.value, tip: [{ value: fmtNum(x.r.requests), name: "requests" }, { value: fmtNum((x.r.inTokens ?? 0) + (x.r.outTokens ?? 0)), name: "tokens" }, { value: fmtUsd(x.r.costUsd), name: "spend" }] }));
+    };
+    const bars = (title, rows, name) => {
+      const host = h("div"), rk = ranked(rows, name);
+      if (!rk.length) host.append(h("p", { class: "muted" }, "Nothing to show."));
+      else barList(host, rk, M.fmt);
+      return card(title, `By ${metric.toLowerCase()}`, host, () => tableView(["Name", "Requests", "Tokens", "Spend"], rows.map((r) => [name(r.id), fmtNum(r.requests), fmtNum(METRICS.Tokens.f(r)), fmtUsd(r.costUsd)])));
+    };
+    const seg = h("div", { class: "seg", role: "group", "aria-label": "Rank by" }, Object.keys(METRICS).map((m) =>
+      h("button", { type: "button", "aria-pressed": String(m === metric), onclick: () => { metric = m; render(); } }, m)));
+    out.replaceChildren(
+      h("div", { class: "kpis" }, tile("Requests", "requests", fmtNum), tile("Input tokens", "inTokens", fmtNum), tile("Output tokens", "outTokens", fmtNum), tile("Spend", "costUsd", fmtUsd)),
+      h("div", { class: "grid2" }, single("Requests", "Per " + (b < DAYMS ? "hour" : "day") + ", UTC", "requests", fmtNum, "Requests"), single("Spend", "Priced models only; unpriced count as $0", "costUsd", fmtUsd, "Spend")),
+      h("div", { class: "grid1" }, tokens),
+      h("div", { class: "row" }, h("h2", {}, "Breakdown"), seg),
+      h("div", { class: "grid3" }, bars("Models", u.byModel, (id) => id), bars("Keys", u.byKey, (id) => names.keys[id] ?? id), bars("Accounts", u.byAccount, (id) => names.accounts[id] ?? id)));
+  };
+
   const load = async () => {
+    out.classList.add("loading");
     try {
-      const [u, keys, accts] = await Promise.all([get(`/admin/usage?since=${PERIODS[period.value]()}`), get("/admin/keys"), get("/admin/accounts")]);
-      const t = (title, rows, names) => [h("h2", {}, title), table(["Name", "Requests", "Input tokens", "Output tokens", "USD"],
-        rows.map((r) => row([names[r.id] ?? r.id, String(r.requests), String(r.inTokens ?? 0), String(r.outTokens ?? 0), usd(r.costUsd)], [1, 2, 3, 4])), [1, 2, 3, 4])];
-      out.replaceChildren(...t("By key", u.byKey, Object.fromEntries(keys.map((k) => [k.id, k.name]))),
-        ...t("By account", u.byAccount, Object.fromEntries(accts.map((a) => [a.id, a.name]))));
+      const P = PERIODS[period.value], b = P.bucket, now = Date.now();
+      const s0 = P.since(), since = s0 - (s0 % b), end = Math.ceil((now + 1) / b) * b, span = end - since;
+      const q = (a, z) => get(`/admin/usage/series?since=${a}&until=${z}&bucket=${b}`);
+      const [curRows, prevRows, u, keys, accts] = await Promise.all([q(since, end), q(since - span, since), get(`/admin/usage?since=${since}`), get("/admin/keys"), get("/admin/accounts")]);
+      data = { cur: fill(curRows, since, end, b), prev: fill(prevRows, since - span, since, b), u, b,
+        names: { keys: Object.fromEntries(keys.map((k) => [k.id, k.name])), accounts: Object.fromEntries(accts.map((a) => [a.id, a.name])) } };
       showErr(e, null);
+      render();
     } catch (x) { showErr(e, x); }
+    out.classList.remove("loading");
   };
   period.addEventListener("change", load);
 
-  const model = h("input", { required: true });
+  const model = h("input", { required: true, placeholder: "exact model string" });
   const inP = h("input", { type: "number", min: "0", step: "any", required: true });
   const outP = h("input", { type: "number", min: "0", step: "any", required: true });
   const pm = err();
   const form = h("form", { onsubmit: async (ev) => {
     ev.preventDefault();
-    try { await api("PUT", "/admin/prices", { model: model.value, inPerM: Number(inP.value), outPerM: Number(outP.value) }); showOk(pm, "Saved."); }
+    try { await api("PUT", "/admin/prices", { model: model.value, inPerM: Number(inP.value), outPerM: Number(outP.value) }); showOk(pm, "Saved. New requests use this price."); }
     catch (x) { showErr(pm, x); }
   } }, field("Model", model), field("USD per 1M input tokens", inP), field("USD per 1M output tokens", outP),
     h("button", { class: "primary", type: "submit" }, "Set price"));
-  root.append(h("div", { class: "row" }, field("Period", period)), e, out, h("h2", {}, "Price override"), form, pm);
+  root.append(h("div", { class: "filters" }, field("Period", period), h("span", { class: "muted" }, "Times are UTC; deltas compare with the previous period of the same length. The latest bucket is still filling.")), e, out,
+    h("h2", {}, "Price override"), form, pm);
   load();
 }
 
