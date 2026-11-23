@@ -1,0 +1,8 @@
+{
+  "name": "turnpike",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-11-01",
+  "assets": { "directory": "public", "binding": "ASSETS" },
+  "durable_objects": { "bindings": [{ "name": "HUB", "class_name": "Hub" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }]
+}
