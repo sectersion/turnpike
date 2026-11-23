@@ -195,3 +195,44 @@ describe("callUpstream translation", () => {
     expect(text2).toContain("[DONE]");
   });
 });
+
+describe("robustness", () => {
+  const two = resolveTargets("fast", accounts, combos, null);
+  it("cancels a failed attempt's body before the next target", async () => {
+    const order: string[] = [];
+    let n = 0;
+    const f = (async () => {
+      if (n++ === 0) {
+        const body = new ReadableStream({ cancel: () => void order.push("cancel") });
+        return new Response(body, { status: 429 });
+      }
+      order.push("second");
+      return json(200);
+    }) as unknown as typeof fetch;
+    expect((await routeWithFallback(two, "openai", oai, f)).status).toBe(200);
+    expect(order).toEqual(["cancel", "second"]);
+  });
+  it("empty baseUrl fails before fetch with a clear 502", async () => {
+    const { f, calls } = fakeFetch(json(200));
+    const t = [{ account: acc("x", "custom-openai"), model: "m" }];
+    const res = await routeWithFallback(t, "openai", oai, f);
+    expect(calls.length).toBe(0);
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as any).error.message).toContain("no baseUrl");
+  });
+  it("missing api key fails before fetch", async () => {
+    const { f, calls } = fakeFetch(json(200));
+    const t = [{ account: acc("x", "openrouter", { secret: "" }), model: "m" }];
+    const res = await routeWithFallback(t, "openai", oai, f);
+    expect(calls.length).toBe(0);
+    expect(((await res.json()) as any).error.message).toContain("no api key");
+  });
+  it("a throwing onAttempt does not break routing", async () => {
+    const { f, calls } = fakeFetch(json(429), json(200, { second: true }));
+    const res = await routeWithFallback(two, "openai", oai, f, () => {
+      throw new Error("log fail");
+    });
+    expect(calls.length).toBe(2);
+    expect(await res.json()).toEqual({ second: true });
+  });
+});

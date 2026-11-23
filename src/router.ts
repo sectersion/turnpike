@@ -42,8 +42,13 @@ export async function routeWithFallback(
     } catch (e) {
       last = e instanceof Error ? e : new Error(String(e));
     }
-    onAttempt?.(t, last);
+    try {
+      onAttempt?.(t, last);
+    } catch {
+      // a throwing hook must not break the fallback chain
+    }
     if (last instanceof Response && !isFallbackEligible(last.status)) return last;
+    if (last instanceof Response && t !== targets[targets.length - 1]) await last.body?.cancel();
   }
   return last instanceof Response ? last : err(502, `upstream failed: ${last.message}`);
 }

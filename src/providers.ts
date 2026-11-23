@@ -30,6 +30,8 @@ export async function callUpstream(t: Target, format: Format, body: unknown, fet
   if (account.kind.endsWith("-oauth")) throw new Error("oauth executor not implemented");
   const { native, defaultBaseUrl } = PROVIDERS[account.kind];
   const base = (account.baseUrl ?? defaultBaseUrl ?? "").replace(/\/+$/, "");
+  if (!base) throw new Error("account has no baseUrl");
+  if (!apiKey(account)) throw new Error("account has no api key");
   const stream = (body as { stream?: unknown }).stream === true;
 
   let req: any = { ...(body as object), model };
