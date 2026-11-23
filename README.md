@@ -7,7 +7,7 @@ A self-hosted LLM router for Cloudflare Workers. You add upstream provider accou
 | `POST /v1/chat/completions` | OpenAI-compatible chat (streaming supported) | router key |
 | `POST /v1/messages` | Anthropic-compatible messages (streaming supported) | router key |
 | `GET /v1/models` | Lists the combos the key may use (not provider models) | router key |
-| `/` | Dashboard (static files in `public/`) | admin token, entered in the page |
+| `/` | Dashboard (static files in `public/`) | none for the page itself; the admin token is entered in it |
 | `/admin/*` | Admin API used by the dashboard | `Authorization: Bearer <ADMIN_TOKEN>` |
 | `GET /health` | Returns `{"ok":true}` | none |
 
@@ -21,14 +21,19 @@ cp .dev.vars.example .dev.vars   # then edit ADMIN_TOKEN
 npm run dev
 ```
 
+`.dev.vars.example` ships `ADMIN_TOKEN=change-me`. Change it: a left-in example value is the real admin token locally.
+
 Open the URL `wrangler dev` prints (normally http://localhost:8787) and enter the admin token.
 
 ## Deploy
 
 ```sh
-npx wrangler secret put ADMIN_TOKEN
+npx wrangler login
 npm run deploy
+npx wrangler secret put ADMIN_TOKEN
 ```
+
+`wrangler login` (or a `CLOUDFLARE_API_TOKEN` environment variable) is a prerequisite. Deploy first, then set the secret: until `ADMIN_TOKEN` is set, `/admin/*` answers 503. Running `secret put` on a Worker that has never been deployed may prompt you to create it.
 
 No resource IDs need pasting: `wrangler.jsonc` declares one Durable Object binding (`HUB`, class `Hub`) with a `new_sqlite_classes` migration, plus the static assets directory. `npx wrangler deploy --dry-run` succeeds without any account-specific values. The first deploy prints the Worker URL (`https://turnpike.<your-subdomain>.workers.dev`); that is your base URL below.
 
@@ -89,16 +94,17 @@ Errors: 401 bad key, 404 unknown model, 403 model exists but not on this key's a
 
 Expected output cost is estimated from `max_tokens`, or 1024 tokens if absent, then replaced by the real usage when the response completes (or kept as the estimate if the upstream reports none).
 
-Pricing: OpenRouter's public model list (`openrouter.ai/api/v1/models`), refreshed daily by the Durable Object, plus manual overrides (Usage tab or `PUT /admin/prices`). Overrides win. A model matches by full id or by the part after the `/`.
+Pricing: OpenRouter's public model list (`openrouter.ai/api/v1/models`), refreshed daily by the Durable Object, plus manual overrides (Usage tab or `PUT /admin/prices`). Overrides win. An override matches only the exact model string sent upstream (the part after `<account>/`, or the combo target's `model`), so `gpt-4o` does not price `openai/gpt-4o`. The OpenRouter table matches by full id or by the part after the `/`.
 
-"Unpriced" means no price is known for the model. A key with a daily or monthly USD cap is refused for unpriced models (429 `limit: unpriced`); a key with no cap is not. Add an override to price it. Subscription accounts (GitHub Copilot) count requests and tokens but always cost zero USD.
+"Unpriced" means no price is known for the model. A key with a daily or monthly USD cap is refused for unpriced models (429 `limit: unpriced`); a key with no cap is not. Add an override, with the exact model string, to price it. Account USD caps (`account_monthly`) likewise do not cover unpriced models, because their recorded cost is 0; put an override on any model you want an account cap to cover. Subscription accounts (GitHub Copilot) count requests and tokens but always cost zero USD.
 
 ## Security
 
 - The admin token controls everything: accounts, keys, prices. Use a long random value.
 - Router keys are stored only as SHA-256 hashes; the secret is shown once at creation.
 - Provider secrets (API keys, OAuth tokens) are stored in plain form in the Durable Object's SQLite storage. They are redacted (`***`) in admin API responses and never sent to the dashboard, but anyone with Cloudflare account access to the Worker's storage can read them.
-- If the Worker URL is public, consider protecting `/` and `/admin/*` with Cloudflare Access and adding rate limiting; turnpike has no per-IP limiting of its own.
+- The Worker URL is public (workers.dev, unless you disable it). The dashboard HTML is served without auth; the only gates are the admin token for `/admin/*` and router keys for `/v1/*`. There is no rate limiting, so a weak admin token can be brute-forced. Consider Cloudflare Access in front of `/` and `/admin/*`, and Cloudflare rate limiting rules.
+- To cut off a key, use Revoke in the Keys tab (API: `DELETE /admin/keys/:id`). A revoked key gets 401 on `/v1/*`.
 
 ## Terms of service
 
