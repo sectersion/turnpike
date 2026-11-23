@@ -8,9 +8,9 @@ For an upstream, run any OpenAI-compatible stub on http://127.0.0.1:9999 (must a
 3. Combos: create combo `test`, Add target (account `stub`, model `m1`), add a second target, reorder with Up/Down, Remove one, Save combo. Reload: persisted.
 4. Keys: the form starts with no account ticked, RPM 30 and max in flight 4. Submitting with no cap and "No USD cap" unticked shows an error; so does submitting with no account ticked. "All API-key accounts" ticks every account except Copilot ones. Create a key `smoke` with "No USD cap" ticked and the `stub` account ticked: the list shows UNCAPPED, RPM 30, in flight 4. The secret appears once in the highlighted box; click Copy. Refresh the tab (switch tabs and back): the secret is gone and not in the list.
 5. `curl http://localhost:8787/v1/chat/completions -H "Authorization: Bearer <secret>" -H "content-type: application/json" -d '{"model":"test","messages":[{"role":"user","content":"hi"}]}'` returns the stub's reply.
-6. Usage: choose "Today": a row for `smoke` and for `stub` with 1 request and the token counts. Set a price override for `m1` (e.g. 1 / 2) and send another request: USD becomes non-zero.
-7. Keys: Revoke `smoke` (confirm). Repeat the curl: 401. Row shows "Revoked".
-8. Accounts: Delete `stub` (confirm); it disappears.
+6. Usage: choose "Today": the tiles show 1 request and the token counts, the charts draw (hover shows a crosshair and tooltip; arrow keys step through points; the Table button swaps in the same data), and the breakdown lists `smoke` and `stub`. Because `m1` is unpriced, a notice offers a price override: click the model name, fill 1 / 2, Set price, send another request: spend becomes non-zero.
+7. Keys: Revoke `smoke` (a dialog asks to confirm; Esc and Cancel both keep the key). Repeat the curl: 401. Row shows "Revoked".
+8. Combos: create `smoke-combo` with a `stub` target, Save, then Delete combo (dialog): it disappears. Accounts: Delete `stub` (dialog); it disappears and the empty state shows. "Download backup" saves a JSON file that contains no provider secret.
 9. Layout: at 390px width there is no horizontal page scroll (tables scroll inside their box); check light and dark; Tab key shows focus rings everywhere.
 10. Try a combo or account name like `<img src=x onerror=alert(1)>`: it displays as literal text and nothing executes.
 11. `curl localhost:8787/health` -> `{"ok":true}`; `/admin/keys` without a token -> 401 JSON (not the dashboard).

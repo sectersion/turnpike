@@ -9,7 +9,12 @@ import { DEFAULT_OUT, listUpstreamModels, MAX_OUT } from "./providers";
 
 export type LimitReason =
   | "key_daily" | "key_monthly" | "key_rpm" | "key_inflight" | "account_monthly" | "rpm" | "tpm" | "cooldown" | "unpriced";
-export type UsageRow = { id: string; requests: number; inTokens: number; outTokens: number; costUsd: number };
+export type UsageRow = { id: string; requests: number; inTokens: number; outTokens: number; costUsd: number; unpriced?: number };
+
+// Ledger rows older than this are deleted by the daily alarm; the dashboard never looks back further.
+const LEDGER_KEEP_MS = 400 * 86_400_000;
+const ADMIN_FAIL_LIMIT = 10;
+const ADMIN_FAIL_WINDOW_MS = 60_000;
 type PriceRow = { model: string; in_per_m: number; out_per_m: number };
 type ResRow = {
   id: string;
@@ -85,6 +90,8 @@ export class Hub extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS prices (model TEXT PRIMARY KEY, in_per_m REAL NOT NULL, out_per_m REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS price_overrides (model TEXT PRIMARY KEY, in_per_m REAL NOT NULL, out_per_m REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS account_models (account_id TEXT NOT NULL, model TEXT NOT NULL, PRIMARY KEY (account_id, model));
+        CREATE TABLE IF NOT EXISTS admin_fails (ip TEXT NOT NULL, ts INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS admin_fails_ip_ts ON admin_fails (ip, ts);
         CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);`);
       this.migrate();
       this.orTable = this.priceTable("prices");
@@ -132,6 +139,7 @@ export class Hub extends DurableObject<Env> {
         this.orTable = t;
       }
     } catch {}
+    this.pruneLedger();
     for (const a of await this.listAccounts(false)) if (a.enabled) await this.refreshModels(a.id).catch(() => {});
     await this.ctx.storage.setAlarm(Date.now() + (Object.keys(this.orTable).length ? DAY : RETRY_MS));
   }
@@ -277,13 +285,42 @@ export class Hub extends DurableObject<Env> {
     const by = (col: "key_id" | "account_id" | "model") =>
       this.sql
         .exec<UsageRow>(
-          `SELECT ${col} AS id, COUNT(*) AS requests, SUM(in_tokens) AS inTokens, SUM(out_tokens) AS outTokens, SUM(cost_usd) AS costUsd
+          `SELECT ${col} AS id, COUNT(*) AS requests, SUM(in_tokens) AS inTokens, SUM(out_tokens) AS outTokens, SUM(cost_usd) AS costUsd, SUM(1 - priced) AS unpriced
            FROM ledger WHERE ts >= ? GROUP BY ${col} ORDER BY ${col}`,
           sinceMs,
         )
         .toArray()
         .map((r) => ({ ...r }));
     return { byKey: by("key_id"), byAccount: by("account_id"), byModel: by("model") };
+  }
+
+  pruneLedger(now = Date.now()): number {
+    return this.sql.exec("DELETE FROM ledger WHERE ts < ?", now - LEDGER_KEEP_MS).rowsWritten;
+  }
+
+  // Brute-force guard for /admin: locked once an IP has ADMIN_FAIL_LIMIT failures inside the window.
+  adminLocked(ip: string, now = Date.now()): boolean {
+    const n = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM admin_fails WHERE ip = ? AND ts > ?", ip, now - ADMIN_FAIL_WINDOW_MS).one().n;
+    return n >= ADMIN_FAIL_LIMIT;
+  }
+  adminFailed(ip: string, now = Date.now()): void {
+    this.sql.exec("DELETE FROM admin_fails WHERE ts < ?", now - 10 * ADMIN_FAIL_WINDOW_MS);
+    this.sql.exec("INSERT INTO admin_fails VALUES (?, ?)", ip, now);
+  }
+
+  // Everything except provider secrets (redacted) and the ledger unless asked for: a config backup.
+  async exportAll(withLedger: boolean) {
+    const rows = (q: string) => this.sql.exec(q).toArray();
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      note: "Provider secrets are redacted; re-enter them after a restore. Key hashes are included so existing router keys keep working.",
+      accounts: await this.listAccounts(true),
+      combos: await this.listCombos(),
+      keys: rows("SELECT id, name, hash, daily_usd AS dailyUsd, monthly_usd AS monthlyUsd, allowed, revoked, rpm, max_inflight AS maxInFlight FROM keys"),
+      priceOverrides: rows("SELECT model, in_per_m AS inPerM, out_per_m AS outPerM FROM price_overrides"),
+      ledger: withLedger ? rows("SELECT ts, key_id AS keyId, account_id AS accountId, model, in_tokens AS inTokens, out_tokens AS outTokens, cost_usd AS costUsd, priced FROM ledger ORDER BY ts") : undefined,
+    };
   }
 
   // Totals per time bucket in [sinceMs, untilMs). t is the bucket start (ms); empty buckets are omitted.
@@ -475,6 +512,10 @@ export class Hub extends DurableObject<Env> {
 
   async upsertCombo(c: Combo): Promise<void> {
     this.sql.exec("INSERT OR REPLACE INTO combos (name, targets) VALUES (?, ?)", c.name, JSON.stringify(c.targets));
+  }
+
+  async deleteCombo(name: string): Promise<boolean> {
+    return this.sql.exec("DELETE FROM combos WHERE name = ?", name).rowsWritten > 0;
   }
 
   async listCombos(): Promise<Combo[]> {

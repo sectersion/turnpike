@@ -54,6 +54,19 @@ const row = (cells, numCols = []) => h("tr", {}, cells.map((c, i) => h("td", { c
 const usd = (n) => `$${(n ?? 0).toFixed(4)}`;
 const lim = (n) => (n == null ? "none" : String(n));
 
+// In-page confirm: resolves true/false. Esc and Cancel both resolve false.
+function ask(message, okLabel = "Delete") {
+  return new Promise((resolve) => {
+    const done = (v) => { dlg.close(); dlg.remove(); resolve(v); };
+    const dlg = h("dialog", { class: "dlg", "aria-label": "Confirm" }, h("p", {}, message),
+      h("div", { class: "row" }, h("button", { type: "button", onclick: () => done(false) }, "Cancel"), h("button", { type: "button", class: "primary", onclick: () => done(true) }, okLabel)));
+    dlg.addEventListener("cancel", (ev) => { ev.preventDefault(); done(false); });
+    document.body.append(dlg);
+    dlg.showModal();
+  });
+}
+const emptyState = (title, hint) => h("div", { class: "card empty" }, h("strong", {}, title), hint);
+
 // ---------- login ----------
 function showLogin(msg = "") {
   signout.hidden = true;
@@ -111,11 +124,23 @@ async function accountsTab(root) {
       const [accts, models] = await Promise.all([get("/admin/accounts"), get("/admin/models")]);
       const count = {};
       for (const m of models) count[m.accountId] = (count[m.accountId] ?? 0) + 1;
-      list.replaceChildren(table(["Name", "Kind", "Enabled", "Models", "RPM", "TPM", "Monthly USD", "Actions"], accts.map((a) => accountRow(a, load, e, count[a.id] ?? 0)), [3]));
+      list.replaceChildren(accts.length ? table(["Name", "Kind", "Enabled", "Models", "RPM", "TPM", "Monthly USD", "Actions"], accts.map((a) => accountRow(a, load, e, count[a.id] ?? 0)), [3])
+        : emptyState("No accounts yet", "Add a provider below. Its model list is fetched automatically."));
       showErr(e, null);
     } catch (x) { showErr(e, x); }
   };
-  root.append(e, list, h("h2", {}, "Add account"), addAccountForm(load));
+  const backup = h("button", { type: "button", onclick: async () => {
+    try {
+      const res = await fetch("/admin/export", { headers: { authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error(`Export failed (${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      const a = h("a", { href: url, download: `turnpike-backup-${new Date().toISOString().slice(0, 10)}.json` });
+      document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      showErr(e, null);
+    } catch (x) { showErr(e, x); }
+  } }, "Download backup");
+  root.append(e, list, h("h2", {}, "Add account"), addAccountForm(load),
+    h("h2", {}, "Backup"), h("p", { class: "muted" }, "Accounts (secrets redacted), keys, combos, price overrides and usage as JSON. Provider keys must be re-entered after a restore."), backup);
   load();
 }
 
@@ -135,7 +160,7 @@ function accountRow(a, reload, e, nModels) {
     h("span", { class: "row" },
       h("button", { type: "button", onclick: () => patch({ rpm: val(rpm), tpm: val(tpm), monthlyUsd: val(usdI) }) }, "Save limits"),
       h("button", { type: "button", class: "danger", onclick: async () => {
-        if (!confirm(`Delete account "${a.name}"?`)) return;
+        if (!(await ask(`Delete account "${a.name}"? Combos that use it will stop working.`))) return;
         try { await api("DELETE", `/admin/accounts/${encodeURIComponent(a.id)}`); await reload(); } catch (x) { showErr(e, x); }
       } }, "Delete")),
   ]);
@@ -204,14 +229,14 @@ async function keysTab(root) {
     try {
       const keys = await get("/admin/keys");
       const names = Object.fromEntries(accts.map((a) => [a.id, a.name]));
-      list.replaceChildren(table(["Name", "Daily USD", "Monthly USD", "RPM", "In flight", "Allowed accounts", "Status", "Actions"], keys.map((k) => row([
+      list.replaceChildren(!keys.length ? emptyState("No keys yet", "Create a router key below to hand out access.") : table(["Name", "Daily USD", "Monthly USD", "RPM", "In flight", "Allowed accounts", "Status", "Actions"], keys.map((k) => row([
         k.name,
         k.dailyUsd == null && k.monthlyUsd == null ? h("span", { class: "badge warn" }, "UNCAPPED") : lim(k.dailyUsd), lim(k.monthlyUsd),
         lim(k.rpm), lim(k.maxInFlight),
         k.allowedAccountIds ? k.allowedAccountIds.map((i) => names[i] ?? i).join(", ") || "none" : "all",
         h("span", { class: k.revoked ? "badge bad" : "badge ok" }, k.revoked ? "Revoked" : "Active"),
         k.revoked ? "" : h("button", { type: "button", class: "danger", onclick: async () => {
-          if (!confirm(`Revoke key "${k.name}"? This cannot be undone.`)) return;
+          if (!(await ask(`Revoke key "${k.name}"? This cannot be undone.`, "Revoke"))) return;
           try { await api("DELETE", `/admin/keys/${encodeURIComponent(k.id)}`); await load(); } catch (x) { showErr(e, x); }
         } }, "Revoke"),
       ]))));
@@ -317,7 +342,12 @@ async function combosTab(root) {
           showOk(msg, "Saved.");
         }
         catch (x) { showErr(msg, x); }
-      } }, "Save combo")));
+      } }, "Save combo"),
+      h("button", { type: "button", class: "danger", onclick: async () => {
+        if (!(await ask(`Delete combo "${c.name}"?`))) return;
+        try { await api("DELETE", `/admin/combos/${encodeURIComponent(c.name)}`); await load(); }
+        catch (x) { if (/not found/i.test(x.message)) await load(); else showErr(msg, x); }
+      } }, "Delete combo")));
   };
   const newCombo = () => {
     const name = h("input", { required: true });
@@ -368,6 +398,9 @@ async function usageTab(root) {
     const xs = cur.map((r) => r.t);
     const total = (k) => sum(cur, k), ptotal = (k) => sum(prev, k);
     if (!total("requests")) return out.replaceChildren(h("div", { class: "card empty" }, h("strong", {}, "No requests in this period"), "Usage appears here once a router key makes a request."));
+    const unpriced = u.byModel.filter((r) => (r.unpriced ?? 0) > 0);
+    const notice = unpriced.length ? h("div", { class: "notice" }, h("strong", {}, `${unpriced.length} ${unpriced.length === 1 ? "model has" : "models have"} no price, so spend shows $0 for ${unpriced.length === 1 ? "it" : "them"}. `),
+      "Set a price override: ", ...unpriced.slice(0, 6).flatMap((r, i) => [i ? ", " : "", h("button", { type: "button", class: "link", onclick: () => { model.value = r.id; model.focus(); model.scrollIntoView({ block: "center" }); } }, r.id)])) : null;
     const tile = (label, k, fmt) => h("div", { class: "tile" }, h("span", { class: "lab" }, label), h("span", { class: "val" }, fmt(total(k))),
       h("div", { class: "row2" }, h("span", { class: "delta" }, delta(total(k), ptotal(k))), sparkline(cur.slice(-12).map((r) => r[k] ?? 0))));
     const fmtX = b < DAYMS ? fmtHour : fmtDay;
@@ -401,6 +434,7 @@ async function usageTab(root) {
     const seg = h("div", { class: "seg", role: "group", "aria-label": "Rank by" }, Object.keys(METRICS).map((m) =>
       h("button", { type: "button", "aria-pressed": String(m === metric), onclick: () => { metric = m; render(); } }, m)));
     out.replaceChildren(
+      notice,
       h("div", { class: "kpis" }, tile("Requests", "requests", fmtNum), tile("Input tokens", "inTokens", fmtNum), tile("Output tokens", "outTokens", fmtNum), tile("Spend", "costUsd", fmtUsd)),
       h("div", { class: "grid2" }, single("Requests", "Per " + (b < DAYMS ? "hour" : "day") + ", UTC", "requests", fmtNum, "Requests"), single("Spend", "Priced models only; unpriced count as $0", "costUsd", fmtUsd, "Spend")),
       h("div", { class: "grid1" }, tokens),

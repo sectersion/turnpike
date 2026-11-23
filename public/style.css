@@ -112,6 +112,12 @@ form h2{width:100%;margin:0}
   td input[list]{width:16rem}
 }
 
+.dlg{border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);padding:24px;max-width:420px;box-shadow:var(--lift)}
+.dlg::backdrop{background:rgba(20,20,19,.45)}
+.dlg p{margin:0 0 20px;font:400 18px/26px var(--serif)}
+.dlg .row{justify-content:flex-end;margin:0}
+.notice{background:var(--warm);border-left:2px solid var(--accent-dk);padding:12px 16px;margin:0 0 16px;font-size:15px;line-height:22px}
+button.link{border:0;background:none;height:auto;padding:0;color:var(--accent-dk);text-decoration:underline;font-size:inherit;line-height:inherit}
 /* ---------- usage dashboard ---------- */
 :root{--c1:#D97757;--c2:#6A9BCC;--grid:rgba(115,114,108,.28);--spark:#B0AEA5}
 .filters{display:flex;gap:16px;align-items:flex-end;margin:0 0 24px}
