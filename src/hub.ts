@@ -273,8 +273,8 @@ export class Hub extends DurableObject<Env> {
     if (r) this.sql.exec("INSERT INTO ledger VALUES (?, ?, ?, ?, 0, 0, 0, ?)", now, r.key_id, r.account_id, r.model, r.priced);
   }
 
-  async usageSummary(sinceMs: number): Promise<{ byKey: UsageRow[]; byAccount: UsageRow[] }> {
-    const by = (col: "key_id" | "account_id") =>
+  async usageSummary(sinceMs: number): Promise<{ byKey: UsageRow[]; byAccount: UsageRow[]; byModel: UsageRow[] }> {
+    const by = (col: "key_id" | "account_id" | "model") =>
       this.sql
         .exec<UsageRow>(
           `SELECT ${col} AS id, COUNT(*) AS requests, SUM(in_tokens) AS inTokens, SUM(out_tokens) AS outTokens, SUM(cost_usd) AS costUsd
@@ -283,7 +283,19 @@ export class Hub extends DurableObject<Env> {
         )
         .toArray()
         .map((r) => ({ ...r }));
-    return { byKey: by("key_id"), byAccount: by("account_id") };
+    return { byKey: by("key_id"), byAccount: by("account_id"), byModel: by("model") };
+  }
+
+  // Totals per time bucket in [sinceMs, untilMs). t is the bucket start (ms); empty buckets are omitted.
+  async usageSeries(sinceMs: number, untilMs: number, bucketMs: number): Promise<{ t: number; requests: number; inTokens: number; outTokens: number; costUsd: number }[]> {
+    return this.sql
+      .exec<{ t: number; requests: number; inTokens: number; outTokens: number; costUsd: number }>(
+        `SELECT ts - (ts % ?) AS t, COUNT(*) AS requests, SUM(in_tokens) AS inTokens, SUM(out_tokens) AS outTokens, SUM(cost_usd) AS costUsd
+         FROM ledger WHERE ts >= ? AND ts < ? GROUP BY t ORDER BY t`,
+        bucketMs, sinceMs, untilMs,
+      )
+      .toArray()
+      .map((r) => ({ ...r }));
   }
 
   private takeReservation(id: string) {

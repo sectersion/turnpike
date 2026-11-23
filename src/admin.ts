@@ -136,6 +136,15 @@ admin.get("/usage", async (c) => {
   return c.json(await hub(c.env).usageSummary(since));
 });
 
+// Time series for the dashboard charts. bucket is hour or day; at most 400 buckets so a typo cannot scan years.
+admin.get("/usage/series", async (c) => {
+  const since = Number(c.req.query("since")), until = Number(c.req.query("until") ?? Date.now()), bucket = Number(c.req.query("bucket"));
+  if (!Number.isFinite(since) || since < 0 || !Number.isFinite(until) || until <= since) throw bad("since and until must be numbers with until > since");
+  if (bucket !== 3_600_000 && bucket !== 86_400_000) throw bad("bucket must be 3600000 (hour) or 86400000 (day)");
+  if ((until - since) / bucket > 400) throw bad("range too long for this bucket");
+  return c.json(await hub(c.env).usageSeries(since, until, bucket));
+});
+
 admin.put("/prices", async (c) => {
   const b = await body(c);
   if (typeof b.model !== "string" || !b.model.trim() || !num(b.inPerM) || !num(b.outPerM)) throw bad("model and non-negative inPerM, outPerM required");
