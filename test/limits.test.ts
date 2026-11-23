@@ -182,7 +182,7 @@ describe("limits through the proxy", () => {
   };
   const acc = (name: string) =>
     mainHub(env).upsertAccount({ kind: "custom-openai", name, authType: "apikey", secret: "s", baseUrl: `https://${name}.example/v1` });
-  const upstreamCalls = (f: { mock: { calls: unknown[][] } }) => f.mock.calls.filter((c) => String(c[0]).includes(".example/"));
+  const upstreamCalls = (f: { mock: { calls: unknown[][] } }) => f.mock.calls.filter((c) => String(c[0]).includes(".example/") && !String(c[0]).endsWith("/models")); // the daily alarm also refreshes model lists
 
   it("a $0 daily cap gets 429 limit: key_daily without calling upstream", async () => {
     const h = mainHub(env);
