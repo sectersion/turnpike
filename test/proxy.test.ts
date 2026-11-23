@@ -53,7 +53,7 @@ describe("proxy", () => {
     expect(res.status).toBe(200);
     expect(((await res.json()) as any).choices[0].message.content).toBe("yo");
     await done();
-    expect(recordUsage).toHaveBeenCalledWith(expect.anything(), { keyId, accountId: accId, model: "m", usage: { inputTokens: 4, outputTokens: 5 } });
+    expect(recordUsage).toHaveBeenCalledWith(expect.anything(), { keyId, accountId: accId, model: "m", reservationId: expect.any(String), usage: { inputTokens: 4, outputTokens: 5 } });
   });
 
   it("streaming anthropic request against openai upstream yields valid anthropic SSE", async () => {
