@@ -22,3 +22,21 @@ it("refreshModels stores the upstream list and /v1/models exposes <account>/<mod
 
 import { env } from "cloudflare:test";
 function env_() { return env; }
+
+it("always sends an explicit stream boolean upstream", async () => {
+  const h = hub(env);
+  const tag = crypto.randomUUID().slice(0, 8);
+  const a = await h.upsertAccount({ kind: "custom-openai", name: `st${tag}`, authType: "apikey", secret: "s", baseUrl: `https://st${tag}.example/v1` });
+  await h.upsertCombo({ name: `st${tag}`, targets: [{ accountId: a.id, model: "m" }] });
+  const { secret } = await h.createKey({ name: "st" });
+  const sent: any[] = [];
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_u, init) => {
+    sent.push(JSON.parse((init as RequestInit).body as string));
+    return Response.json({ id: "1", choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  });
+  const go = (path: string, body: object) =>
+    SELF.fetch("http://x" + path, { method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+  await go("/v1/chat/completions", { model: `st${tag}`, messages: [{ role: "user", content: "hi" }] });
+  await go("/v1/messages", { model: `st${tag}`, max_tokens: 5, messages: [{ role: "user", content: "hi" }] });
+  expect(sent.map((b) => b.stream)).toEqual([false, false]);
+});
