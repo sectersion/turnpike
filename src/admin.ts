@@ -93,6 +93,14 @@ admin.post("/accounts", async (c) => {
 });
 
 admin.get("/models", async (c) => c.json(await hub(c.env).listModels()));
+
+// Config backup as a download. ?ledger=0 leaves the usage ledger out.
+admin.get("/export", async (c) => {
+  const data = await hub(c.env).exportAll(c.req.query("ledger") !== "0");
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: { "content-type": "application/json", "content-disposition": `attachment; filename="turnpike-backup-${new Date().toISOString().slice(0, 10)}.json"` },
+  });
+});
 admin.post("/accounts/:id/models/refresh", async (c) => {
   const r = await hub(c.env).refreshModels(c.req.param("id"));
   return "error" in r ? c.json({ error: { message: r.error } }, r.error === "not found" ? 404 : 502) : c.json(r);
@@ -165,6 +173,7 @@ admin.put("/combos", async (c) => {
   await hub(c.env).upsertCombo({ name: b.name, targets });
   return c.json({ ok: true });
 });
+admin.delete("/combos/:name", async (c) => ((await hub(c.env).deleteCombo(c.req.param("name"))) ? c.json({ ok: true }) : c.json({ error: { message: "not found" } }, 404)));
 
 // OAuth sign-in. Errors carry only provider status/error codes, never tokens.
 const oauthErr = (e: unknown) => ({ error: { message: e instanceof Error ? e.message : "oauth failed" } });

@@ -63,7 +63,7 @@ describe("limits", () => {
     const x = await h.reserve({ keyId: k.id, accountId: a.id, model: "pm", estTokens: 10, maxOutTokens: 5, now: T });
     await h.settle(id(x), null, T);
     const { byKey, byAccount } = await h.usageSummary(0);
-    expect(byKey).toEqual([{ id: k.id, requests: 1, inTokens: 10, outTokens: 5, costUsd: 1 }]);
+    expect(byKey).toEqual([{ id: k.id, requests: 1, inTokens: 10, outTokens: 5, costUsd: 1, unpriced: 0 }]);
     expect(byAccount[0]).toMatchObject({ id: a.id, costUsd: 1 });
     await h.settle(id(await r()), { inputTokens: 2, outputTokens: 7 }, T);
     expect((await h.usageSummary(0)).byKey[0]).toMatchObject({ requests: 2, inTokens: 12, outTokens: 12 });

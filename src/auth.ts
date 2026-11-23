@@ -20,7 +20,13 @@ const bearer = (h: string | undefined) => h?.match(/^Bearer\s+(.+)$/i)?.[1] ?? "
 export const requireAdmin: MiddlewareHandler<AppEnv> = async (c, next) => {
   const token = c.env.ADMIN_TOKEN;
   if (!token) return c.json({ error: "admin disabled: ADMIN_TOKEN not set" }, 503);
-  if (!(await safeEqual(bearer(c.req.header("authorization")), token))) return c.json({ error: "unauthorized" }, 401);
+  // Per-IP lockout: 10 failures in 60 s blocks every attempt from that IP (even a right one) until the window passes.
+  const ip = c.req.header("cf-connecting-ip") ?? "unknown";
+  if (await hub(c.env).adminLocked(ip)) return c.json({ error: "too many failed attempts; try again in a minute" }, 429, { "retry-after": "60" });
+  if (!(await safeEqual(bearer(c.req.header("authorization")), token))) {
+    await hub(c.env).adminFailed(ip);
+    return c.json({ error: "unauthorized" }, 401);
+  }
   await next();
 };
 
