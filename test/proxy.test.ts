@@ -81,11 +81,11 @@ describe("proxy", () => {
     expect(vi.mocked(recordUsage).mock.calls[0][1]).toMatchObject({ accountId: accId, usage: null });
   });
 
-  it("errors: 400 bad json, 404 unknown, 403 not allowed, anthropic style", async () => {
+  it("errors: 400 bad json, 404 unknown, 404 not allowed (M1), anthropic style", async () => {
     expect((await call("/v1/chat/completions", "{nope")).res.status).toBe(400);
     expect((await call("/v1/chat/completions", { model: "zzz/x" })).res.status).toBe(404);
     const k = await hub(env).createKey({ name: "lim", allowedAccountIds: [] });
-    expect((await call("/v1/chat/completions", { model: "mine" }, k.secret)).res.status).toBe(403);
+    expect((await call("/v1/chat/completions", { model: "mine" }, k.secret)).res.status).toBe(404);
     const a = (await (await call("/v1/messages", { model: "zzz/x" })).res.json()) as any;
     expect(a).toMatchObject({ type: "error", error: { type: "not_found_error" } });
   });
