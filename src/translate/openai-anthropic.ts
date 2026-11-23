@@ -11,6 +11,7 @@ import type {
   OpenAIChatRes,
 } from "./types";
 import type { Usage } from "../usage";
+import { DEFAULT_OUT } from "../providers";
 
 const DATA_URI = /^data:([^;,]+);base64,(.*)$/s;
 
@@ -80,7 +81,7 @@ export function openaiReqToAnthropic(r: OpenAIChatReq): AnthropicReq {
       if (content.length) messages.push({ role: m.role as "user" | "assistant", content });
     }
   }
-  const out: AnthropicReq = { model: r.model, messages, max_tokens: r.max_tokens ?? 4096 };
+  const out: AnthropicReq = { model: r.model, messages, max_tokens: r.max_tokens ?? r.max_completion_tokens ?? DEFAULT_OUT };
   if (system.length) out.system = system.join("\n\n");
   if (r.temperature !== undefined) out.temperature = r.temperature;
   if (r.top_p !== undefined) out.top_p = r.top_p;

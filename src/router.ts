@@ -41,6 +41,7 @@ export async function routeWithFallback(
   let gated: string | undefined;
   for (const t of targets) {
     let reservationId: string | undefined;
+    let maxOut: number | undefined;
     if (gate) {
       let g: Gate;
       try {
@@ -54,10 +55,11 @@ export async function routeWithFallback(
         continue;
       }
       reservationId = g.reservationId;
+      maxOut = g.maxOut;
     }
     if (last instanceof Response) await last.body?.cancel(); // superseded failed attempt
     try {
-      last = await callUpstream(t, format, body, fetchFn, authHeaders);
+      last = await callUpstream(t, format, body, fetchFn, authHeaders, maxOut);
     } catch (e) {
       last = e instanceof Error ? e : new Error(String(e));
     }
@@ -74,4 +76,4 @@ export async function routeWithFallback(
   return err(502, `upstream failed: ${last.message}`);
 }
 
-export type Gate = { ok: true; reservationId: string } | { ok: false; reason: string };
+export type Gate = { ok: true; reservationId: string; maxOut?: number } | { ok: false; reason: string };

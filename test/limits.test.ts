@@ -117,7 +117,7 @@ describe("limits", () => {
     // swept after an hour, but still charged: the cap stays reached
     expect(await r(T + 60 * MIN + 1)).toEqual({ ok: false, reason: "key_daily" });
     const row = (await h.usageSummary(0)).byKey.find((x) => x.id === k.id);
-    expect(row).toMatchObject({ requests: 1, inTokens: 1, outTokens: 1024 });
+    expect(row).toMatchObject({ requests: 1, inTokens: 1, outTokens: 4096 }); // DEFAULT_OUT
     expect(row!.costUsd).toBeCloseTo(0.1);
   });
 

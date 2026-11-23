@@ -5,6 +5,7 @@ import type { Account, AccountKind, Combo, RouterKey } from "./types";
 import type { Env } from "./env";
 import type { Usage } from "./usage";
 import { getProvider, type OAuthTokens } from "./oauth";
+import { DEFAULT_OUT, MAX_OUT } from "./providers";
 
 export type LimitReason = "key_daily" | "key_monthly" | "account_monthly" | "rpm" | "tpm" | "cooldown" | "unpriced";
 export type UsageRow = { id: string; requests: number; inTokens: number; outTokens: number; costUsd: number };
@@ -29,6 +30,7 @@ const RETRY_MS = 5 * MINUTE; // empty price cache after a failed refresh
 const SKEW_MS = 60_000; // refresh OAuth tokens this long before they expire
 const RETRY_COOLDOWN_MS = MINUTE; // refresh failed on network/5xx
 const REJECTED_COOLDOWN_MS = 15 * MINUTE; // refresh rejected (400/401-style)
+const MIN_OUT = 256; // below this many affordable output tokens a capped request is refused
 const SUBSCRIPTION = new Set<AccountKind>(["codex-oauth", "copilot-oauth"]);
 
 type KeyRow = {
@@ -111,7 +113,7 @@ export class Hub extends DurableObject<Env> {
   }
 
   async reserve(i: { keyId: string; accountId: string; model: string; estTokens: number; maxOutTokens?: number; now?: number }): Promise<
-    { ok: true; reservationId: string } | { ok: false; reason: LimitReason }
+    { ok: true; reservationId: string; maxOut: number } | { ok: false; reason: LimitReason }
   > {
     if (!this.alarmChecked) {
       this.alarmChecked = true;
@@ -122,7 +124,7 @@ export class Hub extends DurableObject<Env> {
     // single-threading makes check-and-reserve atomic.
     const now = i.now ?? Date.now();
     const estIn = Math.max(0, Math.ceil(i.estTokens) || 0);
-    const estOut = typeof i.maxOutTokens === "number" && i.maxOutTokens >= 0 ? Math.ceil(i.maxOutTokens) : 1024;
+    let estOut = typeof i.maxOutTokens === "number" && i.maxOutTokens >= 0 ? Math.min(Math.ceil(i.maxOutTokens), MAX_OUT) : DEFAULT_OUT;
     this.sweep(now);
     const num = (q: string, ...b: unknown[]) => (this.sql.exec<{ n: number | null }>(q, ...b).one().n ?? 0);
 
@@ -148,26 +150,36 @@ export class Hub extends DurableObject<Env> {
     const sub = acc ? SUBSCRIPTION.has(acc.kind) : false;
     const price = sub ? null : priceFor(i.model, this.priceTable("price_overrides"), this.orTable);
     if (!sub && !price && key && (key.daily_usd !== null || key.monthly_usd !== null)) return { ok: false, reason: "unpriced" };
-    const est = price ? costUsd(price, estIn, estOut) : 0;
-
     const d = new Date(now);
     const dayStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
     const monthStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
-    const spend = (col: "key_id" | "account_id", id: string, from: number) =>
+    const spent = (col: "key_id" | "account_id", id: string, from: number) =>
       num(`SELECT SUM(cost_usd) AS n FROM ledger WHERE ${col} = ? AND ts >= ?`, id, from) +
-      num(`SELECT SUM(est_cost_usd) AS n FROM reservations WHERE ${col} = ?`, id) +
-      est;
-    if (key?.daily_usd != null && spend("key_id", i.keyId, dayStart) > key.daily_usd) return { ok: false, reason: "key_daily" };
-    if (key?.monthly_usd != null && spend("key_id", i.keyId, monthStart) > key.monthly_usd) return { ok: false, reason: "key_monthly" };
-    if (acc?.monthlyUsd != null && spend("account_id", i.accountId, monthStart) > acc.monthlyUsd)
-      return { ok: false, reason: "account_monthly" };
+      num(`SELECT SUM(est_cost_usd) AS n FROM reservations WHERE ${col} = ?`, id);
+    const caps: [number | null | undefined, () => number, LimitReason][] = [
+      [key?.daily_usd, () => spent("key_id", i.keyId, dayStart), "key_daily"],
+      [key?.monthly_usd, () => spent("key_id", i.keyId, monthStart), "key_monthly"],
+      [acc?.monthlyUsd, () => spent("account_id", i.accountId, monthStart), "account_monthly"],
+    ];
+    for (const [cap, spentFn, reason] of caps) {
+      if (cap == null) continue;
+      const left = cap - spentFn();
+      // Clamp the output so this request's worst case fits what is left of the cap.
+      if (price && price.outPerM > 0) {
+        const afford = Math.floor(((left - costUsd(price, estIn, 0)) * 1e6) / price.outPerM);
+        if (afford < Math.min(MIN_OUT, estOut)) return { ok: false, reason };
+        estOut = Math.min(estOut, afford);
+      }
+      if ((price ? costUsd(price, estIn, estOut) : 0) > left + 1e-9) return { ok: false, reason };
+    }
+    const est = price ? costUsd(price, estIn, estOut) : 0;
 
     const id = crypto.randomUUID();
     this.sql.exec(
       "INSERT INTO reservations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       id, i.keyId, i.accountId, i.model, now, estIn, estOut, est, sub || price ? 1 : 0,
     );
-    return { ok: true, reservationId: id };
+    return { ok: true, reservationId: id, maxOut: estOut };
   }
 
   // Stale reservations (request still running past LEAK_MS, or its settle never arrived) are charged at

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { hub } from "./hub-client";
-import type { Format, Target } from "./providers";
+import { badTools, outCap, type Format, type Target } from "./providers";
 import { explainEmpty, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
 import { usageTap } from "./translate/stream";
@@ -34,6 +34,9 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
   const model = body?.model;
   if (typeof model !== "string" || !model) return fail(format, 400, "invalid_request_error", "model is required");
 
+  const toolErr = badTools(format, body);
+  if (toolErr) return fail(format, 400, "invalid_request_error", toolErr);
+
   const key = c.get("key");
   const [accounts, combos] = await Promise.all([hub(c.env).listAccounts(false), hub(c.env).listCombos()]);
   const targets = resolveTargets(model, accounts, combos, key.allowedAccountIds);
@@ -50,7 +53,7 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
     } catch {}
   };
   const estTokens = estimateTokens(body);
-  const maxOutTokens = typeof body.max_tokens === "number" ? body.max_tokens : undefined;
+  const maxOutTokens = outCap(body);
   let gated: string | undefined;
   const gate = async (t: Target) => {
     const g = await h.reserve({ keyId: key.id, accountId: t.account.id, model: t.model, estTokens, maxOutTokens });
