@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { hub } from "./hub-client";
 import type { Format, Target } from "./providers";
-import { explainEmpty, isFallbackEligible, resolveTargets, routeWithFallback } from "./router";
+import { explainEmpty, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
 import { usageTap } from "./translate/stream";
 import { recordUsage } from "./usage";
@@ -11,6 +11,17 @@ export const proxy = new Hono<AppEnv>();
 
 const fail = (format: Format, status: number, type: string, message: string) =>
   Response.json(format === "anthropic" ? { type: "error", error: { type, message } } : { error: { message, type } }, { status });
+
+// Rough input-token estimate for reservations: ~4 chars per token.
+const jsonLen = (v: unknown) => (JSON.stringify(v) ?? "").length;
+export const estimateTokens = (body: any): number => Math.max(1, Math.ceil((jsonLen(body?.messages) + jsonLen(body?.system)) / 4));
+
+// Retry-After as seconds or an HTTP date; default 30s, capped at 15 minutes.
+export function retryAfterMs(h: string | null): number {
+  const s = h?.trim() ?? "";
+  const ms = /^\d+$/.test(s) ? Number(s) * 1000 : Date.parse(s) - Date.now();
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, 15 * 60_000) : 30_000;
+}
 
 async function handle(c: import("hono").Context<AppEnv>, format: Format): Promise<Response> {
   let body: any;
@@ -30,29 +41,54 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
       ? fail(format, 403, "permission_error", "this key may not use that model")
       : fail(format, 404, "not_found_error", `unknown model: ${model}`);
 
-  let winner: Target | undefined;
-  const res = await routeWithFallback(targets, format, body, fetch, (t, r) => {
-    if (r instanceof Response ? !isFallbackEligible(r.status) : t === targets[targets.length - 1]) winner = t;
-  });
-  if (!res.ok || !winner) return res;
+  const h = hub(c.env);
+  const safe = (p: Promise<void>) => p.catch(() => {});
+  const bg = (p: () => Promise<void>) => {
+    try {
+      c.executionCtx.waitUntil(safe(p()));
+    } catch {}
+  };
+  const estTokens = estimateTokens(body);
+  const maxOutTokens = typeof body.max_tokens === "number" ? body.max_tokens : undefined;
+  let gated: string | undefined;
+  const gate = async (t: Target) => {
+    const g = await h.reserve({ keyId: key.id, accountId: t.account.id, model: t.model, estTokens, maxOutTokens });
+    if (!g.ok) gated ??= g.reason;
+    return g;
+  };
+  const attempts: { t: Target; r: Response | Error; rid?: string }[] = [];
+  const res = await routeWithFallback(
+    targets,
+    format,
+    body,
+    fetch,
+    (t, r, rid) => {
+      attempts.push({ t, r, rid });
+      if (r instanceof Response && r.status === 429) {
+        const until = Date.now() + retryAfterMs(r.headers.get("retry-after"));
+        bg(() => h.setCooldown(t.account.id, until));
+      }
+    },
+    gate,
+  );
+  const win = attempts.find((a) => a.r === res);
+  // Every attempt reached (or tried to reach) upstream: all but a successful winner are released, still counting toward rpm.
+  for (const a of attempts) if (a.rid && (a !== win || !res.ok)) bg(() => h.release(a.rid!));
+  if (!win && gated) return fail(format, 429, "rate_limit", `limit: ${gated}`);
+  if (!res.ok || !win?.rid) return res;
+  const winner = win.t;
+  const reservationId = win.rid;
 
   const rec = (usage: { inputTokens: number; outputTokens: number } | null) =>
-    recordUsage(c.env, { keyId: key.id, accountId: winner!.account.id, model: winner!.model, usage });
-  const safe = (p: Promise<void>) => p.catch(() => {});
+    recordUsage(c.env, { keyId: key.id, accountId: winner.account.id, model: winner.model, reservationId, usage });
 
   if (body.stream === true && res.body) {
-    // Must never throw: usageTap calls this from flush/cancel.
-    const tapped = res.body.pipeThrough(
-      usageTap((u) => {
-        try {
-          c.executionCtx.waitUntil(safe(rec(u)));
-        } catch {}
-      }),
-    );
+    // bg never throws: usageTap calls this from flush/cancel.
+    const tapped = res.body.pipeThrough(usageTap((u) => bg(() => rec(u))));
     return new Response(tapped, { status: res.status, headers: res.headers });
   }
   const clone = res.clone();
-  c.executionCtx.waitUntil(safe(clone.json().then((j) => rec(extractUsage(j)), () => rec(null))));
+  bg(() => clone.json().then((j) => rec(extractUsage(j)), () => rec(null)));
   return res;
 }
 

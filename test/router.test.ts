@@ -105,6 +105,19 @@ describe("routeWithFallback", () => {
     expect(((await r2.json()) as any).error.message).toContain("boom");
     expect(seen.length).toBe(2);
   });
+  it("gate: rejected targets are skipped unfetched; reservation ids reach onAttempt; all gated is 429", async () => {
+    const { f, calls } = fakeFetch(json(503, { e: "first" }));
+    const seen: (string | undefined)[] = [];
+    const gate = async (t: { account: { id: string } }) =>
+      t === targets[0] ? { ok: true as const, reservationId: "r1" } : { ok: false as const, reason: "rpm" };
+    const res = await routeWithFallback(targets, "openai", oai, f, (_t, _r, rid) => seen.push(rid), gate);
+    expect(calls.length).toBe(1);
+    expect(seen).toEqual(["r1"]);
+    expect(await res.json()).toEqual({ e: "first" }); // earlier failure is returned intact, not cancelled
+    const none = await routeWithFallback(targets, "openai", oai, f, undefined, async () => ({ ok: false, reason: "tpm" }));
+    expect(none.status).toBe(429);
+    expect(await none.json()).toEqual({ error: { message: "limit: tpm", type: "rate_limit" } });
+  });
   it("no targets is 404", async () => {
     expect((await routeWithFallback([], "openai", oai, fakeFetch(json(200)).f)).status).toBe(404);
   });

@@ -32,23 +32,45 @@ export async function routeWithFallback(
   format: Format,
   body: unknown,
   fetchFn: typeof fetch,
-  onAttempt?: (t: Target, res: Response | Error) => void,
+  onAttempt?: (t: Target, res: Response | Error, reservationId?: string) => void,
+  gate?: (t: Target) => Promise<Gate>,
 ): Promise<Response> {
   if (!targets.length) return err(404, "no matching model");
   let last: Response | Error = new Error("no attempt");
+  let gated: string | undefined;
   for (const t of targets) {
+    let reservationId: string | undefined;
+    if (gate) {
+      let g: Gate;
+      try {
+        g = await gate(t);
+      } catch (e) {
+        if (!(last instanceof Response)) last = e instanceof Error ? e : new Error(String(e));
+        continue;
+      }
+      if (!g.ok) {
+        gated ??= g.reason;
+        continue;
+      }
+      reservationId = g.reservationId;
+    }
+    if (last instanceof Response) await last.body?.cancel(); // superseded failed attempt
     try {
       last = await callUpstream(t, format, body, fetchFn);
     } catch (e) {
       last = e instanceof Error ? e : new Error(String(e));
     }
     try {
-      onAttempt?.(t, last);
+      onAttempt?.(t, last, reservationId);
     } catch {
       // a throwing hook must not break the fallback chain
     }
     if (last instanceof Response && !isFallbackEligible(last.status)) return last;
-    if (last instanceof Response && t !== targets[targets.length - 1]) await last.body?.cancel();
   }
-  return last instanceof Response ? last : err(502, `upstream failed: ${last.message}`);
+  if (last instanceof Response) return last;
+  if (gated)
+    return Response.json({ error: { message: `limit: ${gated}`, type: "rate_limit" } }, { status: 429 });
+  return err(502, `upstream failed: ${last.message}`);
 }
+
+export type Gate = { ok: true; reservationId: string } | { ok: false; reason: string };
