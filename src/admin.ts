@@ -87,7 +87,15 @@ admin.post("/accounts", async (c) => {
     const v = limit(b, f);
     if (v !== undefined && v !== null) acc[f] = v;
   }
-  return c.json(redact(await hub(c.env).upsertAccount(acc)), 201);
+  const created = await hub(c.env).upsertAccount(acc);
+  c.executionCtx.waitUntil(hub(c.env).refreshModels(created.id).then(() => {}, () => {}));
+  return c.json(redact(created), 201);
+});
+
+admin.get("/models", async (c) => c.json(await hub(c.env).listModels()));
+admin.post("/accounts/:id/models/refresh", async (c) => {
+  const r = await hub(c.env).refreshModels(c.req.param("id"));
+  return "error" in r ? c.json({ error: { message: r.error } }, r.error === "not found" ? 404 : 502) : c.json(r);
 });
 
 // Limits may be cleared with null. The merge runs inside the Hub; secret/id/kind/authType are never touched.

@@ -125,3 +125,24 @@ export async function callUpstream(
     headers: h,
   });
 }
+
+// GET {base}/models for an account; OpenAI and Anthropic both answer { data: [{ id }] }. Throws on any failure.
+export async function listUpstreamModels(account: Account, authHeaders?: AuthHeaders, fetchFn: typeof fetch = fetch): Promise<string[]> {
+  const oauth = account.kind.endsWith("-oauth");
+  if (oauth && !authHeaders) throw new Error("oauth executor not implemented");
+  const { native, defaultBaseUrl } = PROVIDERS[account.kind];
+  const base = (account.baseUrl ?? defaultBaseUrl ?? "").replace(/\/+$/, "");
+  if (!base) throw new Error("account has no baseUrl");
+  const key = oauth ? "" : apiKey(account);
+  const headers: Record<string, string> = oauth ? await authHeaders!(account) : {};
+  if (account.kind === "opencode-go") headers["x-opencode-session"] = account.id;
+  if (native === "anthropic") {
+    if (key) headers["x-api-key"] = key;
+    headers["anthropic-version"] = "2023-06-01";
+  } else if (key) headers.Authorization = `Bearer ${key}`;
+  const res = await fetchFn(`${base}/models`, { headers, redirect: "manual", signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`models request failed: HTTP ${res.status}`);
+  const j: any = await res.json();
+  const ids = (Array.isArray(j?.data) ? j.data : []).map((d: any) => d?.id).filter((x: unknown): x is string => typeof x === "string" && !!x);
+  return [...new Set<string>(ids)].slice(0, 5000);
+}

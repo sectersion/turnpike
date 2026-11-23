@@ -5,7 +5,7 @@ import type { Account, AccountKind, Combo, RouterKey } from "./types";
 import type { Env } from "./env";
 import type { Usage } from "./usage";
 import { getProvider, type OAuthTokens } from "./oauth";
-import { DEFAULT_OUT, MAX_OUT } from "./providers";
+import { DEFAULT_OUT, listUpstreamModels, MAX_OUT } from "./providers";
 
 export type LimitReason =
   | "key_daily" | "key_monthly" | "key_rpm" | "key_inflight" | "account_monthly" | "rpm" | "tpm" | "cooldown" | "unpriced";
@@ -84,6 +84,7 @@ export class Hub extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS cooldowns (account_id TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS prices (model TEXT PRIMARY KEY, in_per_m REAL NOT NULL, out_per_m REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS price_overrides (model TEXT PRIMARY KEY, in_per_m REAL NOT NULL, out_per_m REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS account_models (account_id TEXT NOT NULL, model TEXT NOT NULL, PRIMARY KEY (account_id, model));
         CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);`);
       this.migrate();
       this.orTable = this.priceTable("prices");
@@ -131,6 +132,7 @@ export class Hub extends DurableObject<Env> {
         this.orTable = t;
       }
     } catch {}
+    for (const a of await this.listAccounts(false)) if (a.enabled) await this.refreshModels(a.id).catch(() => {});
     await this.ctx.storage.setAlarm(Date.now() + (Object.keys(this.orTable).length ? DAY : RETRY_MS));
   }
 
@@ -432,6 +434,31 @@ export class Hub extends DurableObject<Env> {
 
   async deleteAccount(id: string): Promise<void> {
     this.sql.exec("DELETE FROM accounts WHERE id = ?", id);
+    this.sql.exec("DELETE FROM account_models WHERE account_id = ?", id);
+  }
+
+  // Fetch the upstream's model list and replace the stored one. A failure keeps the old list.
+  async refreshModels(accountId: string): Promise<{ count: number } | { error: string }> {
+    const a = this.accountSync(accountId);
+    if (!a) return { error: "not found" };
+    try {
+      const ids = await listUpstreamModels(a, (x) => this.getAuthHeaders(x.id));
+      if (!ids.length) return { error: "upstream returned no models" };
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec("DELETE FROM account_models WHERE account_id = ?", accountId);
+        for (const m of ids) this.sql.exec("INSERT INTO account_models VALUES (?, ?)", accountId, m);
+      });
+      return { count: ids.length };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : "models request failed" };
+    }
+  }
+
+  async listModels(): Promise<{ accountId: string; model: string }[]> {
+    return this.sql
+      .exec<{ account_id: string; model: string }>("SELECT account_id, model FROM account_models ORDER BY account_id, model")
+      .toArray()
+      .map((r) => ({ accountId: r.account_id, model: r.model }));
   }
 
   async upsertCombo(c: Combo): Promise<void> {
