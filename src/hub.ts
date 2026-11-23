@@ -252,6 +252,29 @@ export class Hub extends DurableObject<Env> {
     return acc;
   }
 
+  // Read-merge-write with no await in between, so it cannot interleave with a token rotation.
+  // Only whitelisted fields are applied; null clears one. secret/id/kind/authType are never touched.
+  async patchAccount(
+    id: string,
+    f: Partial<Record<"enabled" | "name" | "baseUrl" | "rpm" | "tpm" | "monthlyUsd", unknown>>,
+  ): Promise<{ account: Account } | { error: string }> {
+    const cur = this.accountSync(id);
+    if (!cur) return { error: "not found" };
+    const next: Account = { ...cur };
+    if (typeof f.enabled === "boolean") next.enabled = f.enabled;
+    if (typeof f.name === "string" && f.name.trim()) next.name = f.name.trim();
+    for (const k of ["rpm", "tpm", "monthlyUsd"] as const) {
+      if (f[k] === null) delete next[k];
+      else if (typeof f[k] === "number") next[k] = f[k] as number;
+    }
+    if (f.baseUrl === null) {
+      if (cur.kind === "custom-openai" || cur.kind === "custom-anthropic") return { error: "baseUrl required for custom kinds" };
+      delete next.baseUrl;
+    } else if (typeof f.baseUrl === "string") next.baseUrl = f.baseUrl;
+    this.sql.exec("UPDATE accounts SET data = ? WHERE id = ?", JSON.stringify(next), id);
+    return { account: next };
+  }
+
   async listAccounts(redact: boolean): Promise<Account[]> {
     return this.sql
       .exec<{ data: string }>("SELECT data FROM accounts ORDER BY rowid")

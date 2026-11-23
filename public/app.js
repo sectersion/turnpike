@@ -267,7 +267,11 @@ async function combosTab(root) {
     return h("section", {}, h("h2", {}, c.name), out, msg, h("div", { class: "row" },
       h("button", { type: "button", disabled: !accts.length, onclick: () => { targets.push({ accountId: accts[0].id, model: "" }); draw(); } }, "Add target"),
       h("button", { type: "button", class: "primary", onclick: async () => {
-        try { await api("PUT", "/admin/combos", { name: c.name, targets }); showOk(msg, "Saved."); }
+        try {
+          if (!targets.length) throw new Error("Add at least one target first.");
+          await api("PUT", "/admin/combos", { name: c.name, targets });
+          showOk(msg, "Saved.");
+        }
         catch (x) { showErr(msg, x); }
       } }, "Save combo")));
   };
@@ -276,7 +280,8 @@ async function combosTab(root) {
     const m = err();
     return h("form", { onsubmit: async (ev) => {
       ev.preventDefault();
-      try { await api("PUT", "/admin/combos", { name: name.value, targets: [] }); await load(); } catch (x) { showErr(m, x); }
+      box.insertBefore(comboEditor({ name: name.value, targets: [] }), ev.target);
+      name.value = "";
     } }, h("h2", {}, "New combo"), field("Combo name", name), h("button", { class: "primary", type: "submit" }, "Create combo"), m);
   };
   root.append(h("h2", {}, "Combos"), e, box);

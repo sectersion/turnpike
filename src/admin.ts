@@ -17,12 +17,40 @@ const body = async (c: Context): Promise<Record<string, unknown>> => {
   return b as Record<string, unknown>;
 };
 const num = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0;
-const validUrl = (u: unknown) => typeof u === "string" && /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1)([:/]|$))/.test(u);
+// https with a host, or plain http only to the loopback names; no userinfo.
+const validBaseUrl = (s: unknown) => {
+  if (typeof s !== "string") return false;
+  let u: URL;
+  try { u = new URL(s); } catch { return false; }
+  if (u.username || u.password || !u.hostname) return false;
+  return u.protocol === "https:" || (u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1"));
+};
+// undefined: absent; null: clear; else a validated number (rpm/tpm must be integers).
+const limit = (b: Record<string, unknown>, f: "rpm" | "tpm" | "monthlyUsd" | "dailyUsd"): number | null | undefined => {
+  if (!(f in b) || b[f] === undefined) return undefined;
+  const v = b[f];
+  if (v === null) return null;
+  if (num(v) && (f === "monthlyUsd" || f === "dailyUsd" || Number.isInteger(v))) return v as number;
+  throw bad(`${f} must be ${f === "rpm" || f === "tpm" ? "a non-negative integer" : "a non-negative number"} or null`);
+};
 const redact = (a: Account) => ({ ...a, secret: "***" });
 admin.onError((e, c) => (e instanceof HTTPException ? e.getResponse() : c.json({ error: { message: "internal error" } }, 500)));
 
 admin.get("/keys", async (c) => c.json(await hub(c.env).listKeys()));
-admin.post("/keys", async (c) => c.json(await hub(c.env).createKey(await body(c) as any), 201));
+admin.post("/keys", async (c) => {
+  const b = await body(c);
+  if (typeof b.name !== "string" || !b.name.trim()) throw bad("name required");
+  const i: Parameters<ReturnType<typeof hub>["createKey"]>[0] = { name: b.name.trim() };
+  const d = limit(b, "dailyUsd"), m = limit(b, "monthlyUsd");
+  if (d != null) i.dailyUsd = d;
+  if (m != null) i.monthlyUsd = m;
+  const al = b.allowedAccountIds;
+  if (al != null) {
+    if (!Array.isArray(al) || al.length > 200 || al.some((x) => typeof x !== "string")) throw bad("allowedAccountIds must be an array of at most 200 strings");
+    i.allowedAccountIds = al;
+  }
+  return c.json(await hub(c.env).createKey(i), 201);
+});
 admin.delete("/keys/:id", async (c) => {
   await hub(c.env).revokeKey(c.req.param("id"));
   return c.json({ ok: true });
@@ -33,45 +61,51 @@ admin.post("/accounts", async (c) => {
   const b = await body(c);
   const kind = b.kind as AccountKind;
   if (typeof kind !== "string" || !Object.hasOwn(PROVIDERS, kind)) throw bad("unknown kind");
+  if (kind.endsWith("-oauth")) throw bad("oauth accounts are created via /admin/oauth/:kind/complete");
   if (typeof b.name !== "string" || !b.name.trim()) throw bad("name required");
   const custom = kind === "custom-openai" || kind === "custom-anthropic";
-  if (!kind.endsWith("-oauth")) {
-    const k = typeof b.secret === "string" ? b.secret : (b.secret as { apiKey?: unknown } | undefined)?.apiKey;
-    if (!custom && (typeof k !== "string" || !k.trim())) throw bad("api key required");
-    if (custom && k !== undefined && typeof k !== "string") throw bad("invalid secret");
-  }
-  if (b.baseUrl !== undefined && !validUrl(b.baseUrl)) throw bad("baseUrl must start with https://");
+  const k = typeof b.secret === "string" ? b.secret : (b.secret as { apiKey?: unknown } | undefined)?.apiKey;
+  if (!custom && (typeof k !== "string" || !k.trim())) throw bad("api key required");
+  if (custom && k !== undefined && typeof k !== "string") throw bad("invalid secret");
+  if (b.baseUrl !== undefined && !validBaseUrl(b.baseUrl)) throw bad("invalid baseUrl");
   if (custom && !b.baseUrl) throw bad("baseUrl required for custom kinds");
-  const a = await hub(c.env).upsertAccount({ ...(b as any), secret: (b.secret as any) ?? "" });
-  return c.json(redact(a), 201);
+  if (b.enabled !== undefined && typeof b.enabled !== "boolean") throw bad("enabled must be boolean");
+  const acc: Parameters<ReturnType<typeof hub>["upsertAccount"]>[0] = {
+    kind, name: b.name.trim(), authType: "apikey", secret: (b.secret as any) ?? "",
+  };
+  if (b.baseUrl !== undefined) acc.baseUrl = b.baseUrl as string;
+  if (b.enabled !== undefined) acc.enabled = b.enabled;
+  for (const f of ["rpm", "tpm", "monthlyUsd"] as const) {
+    const v = limit(b, f);
+    if (v !== undefined && v !== null) acc[f] = v;
+  }
+  return c.json(redact(await hub(c.env).upsertAccount(acc)), 201);
 });
 
-// Limits may be cleared with null; the secret is never accepted here.
+// Limits may be cleared with null. The merge runs inside the Hub; secret/id/kind/authType are never touched.
 admin.patch("/accounts/:id", async (c) => {
   const b = await body(c);
-  const cur = await hub(c.env).getAccount(c.req.param("id"));
-  if (!cur) return c.json({ error: { message: "not found" } }, 404);
-  const next: Account = { ...cur };
+  const f: Record<string, unknown> = {};
   if ("enabled" in b) {
     if (typeof b.enabled !== "boolean") throw bad("enabled must be boolean");
-    next.enabled = b.enabled;
+    f.enabled = b.enabled;
   }
   if ("name" in b) {
     if (typeof b.name !== "string" || !b.name.trim()) throw bad("name required");
-    next.name = b.name;
+    f.name = b.name.trim();
   }
-  for (const f of ["rpm", "tpm", "monthlyUsd"] as const) {
-    if (!(f in b)) continue;
-    if (b[f] === null) delete next[f];
-    else if (num(b[f])) next[f] = b[f] as number;
-    else throw bad(`${f} must be a number >= 0 or null`);
+  for (const k of ["rpm", "tpm", "monthlyUsd"] as const) {
+    const v = limit(b, k);
+    if (v !== undefined) f[k] = v;
   }
   if ("baseUrl" in b) {
-    if (b.baseUrl === null || b.baseUrl === "") delete next.baseUrl;
-    else if (validUrl(b.baseUrl)) next.baseUrl = b.baseUrl as string;
-    else throw bad("baseUrl must start with https://");
+    if (b.baseUrl === null || b.baseUrl === "") f.baseUrl = null;
+    else if (validBaseUrl(b.baseUrl)) f.baseUrl = b.baseUrl;
+    else throw bad("invalid baseUrl");
   }
-  return c.json(redact(await hub(c.env).upsertAccount(next)));
+  const r = await hub(c.env).patchAccount(c.req.param("id"), f);
+  if ("error" in r) return c.json({ error: { message: r.error } }, r.error === "not found" ? 404 : 400);
+  return c.json(redact(r.account));
 });
 admin.delete("/accounts/:id", async (c) => {
   await hub(c.env).deleteAccount(c.req.param("id"));
@@ -95,7 +129,15 @@ admin.put("/prices", async (c) => {
 
 admin.get("/combos", async (c) => c.json(await hub(c.env).listCombos()));
 admin.put("/combos", async (c) => {
-  await hub(c.env).upsertCombo(await body(c) as any);
+  const b = await body(c);
+  const t = b.targets;
+  if (typeof b.name !== "string" || !b.name.trim()) throw bad("name required");
+  if (!Array.isArray(t) || t.length < 1 || t.length > 50) throw bad("targets must be an array of 1 to 50 items");
+  const targets = t.map((x) => {
+    if (!x || typeof x.accountId !== "string" || !x.accountId || typeof x.model !== "string" || !x.model) throw bad("each target needs accountId and model");
+    return { accountId: x.accountId as string, model: x.model as string };
+  });
+  await hub(c.env).upsertCombo({ name: b.name, targets });
   return c.json({ ok: true });
 });
 
