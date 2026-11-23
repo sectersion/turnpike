@@ -249,3 +249,16 @@ describe("robustness", () => {
     expect(await res.json()).toEqual({ second: true });
   });
 });
+
+describe("I8: cancel() rejection", () => {
+  it("a superseded body whose cancel rejects does not break the fallback chain", async () => {
+    const t = resolveTargets("fast", accounts, combos, null);
+    let n = 0;
+    const f = (async () =>
+      n++ === 0
+        ? new Response(new ReadableStream({ cancel: () => Promise.reject(new Error("cancel failed")) }), { status: 503 })
+        : json(200, { second: true })) as unknown as typeof fetch;
+    const res = await routeWithFallback(t, "openai", oai, f);
+    expect(await res.json()).toEqual({ second: true });
+  });
+});

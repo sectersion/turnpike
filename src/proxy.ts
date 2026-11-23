@@ -79,31 +79,40 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
   const estTokens = estimateTokens(body);
   const maxOutTokens = outCap(body);
   let gated: string | undefined;
+  const reserved: string[] = [];
   const gate = async (t: Target) => {
     const g = await h.reserve({ keyId: key.id, accountId: t.account.id, model: t.model, estTokens, maxOutTokens });
-    if (!g.ok) gated ??= g.reason;
+    if (g.ok) reserved.push(g.reservationId);
+    else gated ??= g.reason;
     return g;
   };
   const authHeaders = (a: Account) => h.getAuthHeaders(a.id);
   const attempts: { t: Target; r: Response | Error; rid?: string }[] = [];
-  const res = await routeWithFallback(
-    targets,
-    format,
-    body,
-    fetch,
-    (t, r, rid) => {
-      attempts.push({ t, r, rid });
-      if (r instanceof Response && (r.status === 429 || isAccountFailure(r.status))) {
-        const until = Date.now() + (r.status === 429 ? retryAfterMs(r.headers.get("retry-after")) : ACCOUNT_COOLDOWN_MS);
-        bg(() => h.setCooldown(t.account.id, until));
-      }
-    },
-    gate,
-    authHeaders,
-  );
+  let res: Response | undefined;
+  try {
+    res = await routeWithFallback(
+      targets,
+      format,
+      body,
+      fetch,
+      (t, r, rid) => {
+        attempts.push({ t, r, rid });
+        if (r instanceof Response && (r.status === 429 || isAccountFailure(r.status))) {
+          const until = Date.now() + (r.status === 429 ? retryAfterMs(r.headers.get("retry-after")) : ACCOUNT_COOLDOWN_MS);
+          bg(() => h.setCooldown(t.account.id, until));
+        }
+      },
+      gate,
+      authHeaders,
+    );
+  } catch {
+    return fail(format, 502, "api_error", "upstream failed");
+  } finally {
+    // Every reservation but a successful winner's is released (still counting toward rpm), even on a throw.
+    const keep = res?.ok ? attempts.find((a) => a.r === res)?.rid : undefined;
+    for (const rid of reserved) if (rid !== keep) bg(() => h.release(rid));
+  }
   const win = attempts.find((a) => a.r === res);
-  // Every attempt reached (or tried to reach) upstream: all but a successful winner are released, still counting toward rpm.
-  for (const a of attempts) if (a.rid && (a !== win || !res.ok)) bg(() => h.release(a.rid!));
   if (!win && gated) return fail(format, 429, "rate_limit", `limit: ${gated}`);
   if (win && !res.ok) return upstreamError(format, res);
   if (!res.ok || !win?.rid) return res;

@@ -59,7 +59,7 @@ export async function routeWithFallback(
       reservationId = g.reservationId;
       maxOut = g.maxOut;
     }
-    if (last instanceof Response) await last.body?.cancel(); // superseded failed attempt
+    if (last instanceof Response) await last.body?.cancel().catch(() => {}); // superseded failed attempt
     try {
       last = await callUpstream(t, format, body, fetchFn, authHeaders, maxOut);
     } catch (e) {
