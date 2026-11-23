@@ -121,4 +121,61 @@ describe("stream translation", () => {
     await r.cancel();
     expect(calls).toEqual([{ inputTokens: 11, outputTokens: 7 }]);
   });
+
+  describe("usageTap exactly-once", () => {
+    const U = { inputTokens: 11, outputTokens: 7 };
+    const partial = ANTHROPIC_TEXT.slice(0, ANTHROPIC_TEXT.indexOf("event: message_stop"));
+    const setup = () => {
+      const calls: unknown[] = [];
+      const t = usageTap((u) => calls.push(u));
+      return { calls, w: t.writable.getWriter(), r: t.readable.getReader() };
+    };
+
+    it("flush then cancel reports once", async () => {
+      const { calls, w, r } = setup();
+      await w.write(enc.encode(ANTHROPIC_TEXT));
+      await w.close();
+      while (!(await r.read()).done);
+      await r.cancel();
+      expect(calls).toEqual([U]);
+    });
+
+    it("cancel then flush reports once", async () => {
+      const { calls, w, r } = setup();
+      void w.write(enc.encode(partial)).catch(() => {});
+      await r.read();
+      await r.cancel();
+      await w.close().catch(() => {});
+      expect(calls).toEqual([U]);
+    });
+
+    it("error then cancel reports once", async () => {
+      const { calls, w, r } = setup();
+      void w.write(enc.encode(partial)).catch(() => {});
+      await r.read();
+      await w.abort(new Error("boom"));
+      await expect(r.read()).rejects.toThrow("boom");
+      await r.cancel().catch(() => {});
+      expect(calls).toEqual([U]);
+    });
+
+    it("upstream error mid-stream rejects the reader and reports last usage once", async () => {
+      const { calls, w, r } = setup();
+      void w.write(enc.encode(partial)).catch(() => {});
+      await r.read();
+      await w.abort(new Error("boom"));
+      await expect(r.read()).rejects.toThrow("boom");
+      expect(calls).toEqual([U]);
+    });
+
+    it("cancel propagates to the writable", async () => {
+      const { calls, w, r } = setup();
+      void w.write(enc.encode(partial)).catch(() => {});
+      await r.read();
+      await r.cancel(new Error("gone"));
+      await expect(w.closed).rejects.toThrow("gone");
+      await expect(w.write(enc.encode("x"))).rejects.toThrow("gone");
+      expect(calls).toEqual([U]);
+    });
+  });
 });

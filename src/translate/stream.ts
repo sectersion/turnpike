@@ -226,9 +226,14 @@ export function usageTap(onUsage: (u: Usage | null) => void): TransformStream<Ui
   const reader = ts.readable.getReader();
   const readable = new ReadableStream<Uint8Array>({
     async pull(ctrl) {
-      const { done, value } = await reader.read();
-      if (done) ctrl.close();
-      else ctrl.enqueue(value);
+      try {
+        const { done, value } = await reader.read();
+        if (done) ctrl.close();
+        else ctrl.enqueue(value);
+      } catch (e) {
+        report(); // upstream aborted/errored: keep usage seen so far
+        throw e;
+      }
     },
     async cancel(reason) {
       p.end();
