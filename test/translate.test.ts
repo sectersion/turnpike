@@ -140,4 +140,93 @@ describe("translate", () => {
     expect(extractUsage({})).toBeNull();
     expect(extractUsage(null)).toBeNull();
   });
+
+  it("developer and multiple system messages join into one system field", () => {
+    const a = openaiReqToAnthropic({
+      model: "m",
+      messages: [
+        { role: "system", content: "a" },
+        { role: "developer", content: "b" },
+        { role: "system", content: null },
+        { role: "user", content: "hi" },
+      ],
+    });
+    expect(a.system).toBe("a\n\nb");
+    expect(a.messages).toEqual([{ role: "user", content: "hi" }]);
+  });
+
+  it("anthropic system block array joins; null assistant content is omitted", () => {
+    const o = anthropicReqToOpenai({
+      model: "m",
+      max_tokens: 1,
+      system: [{ type: "text", text: "x" }, { type: "text", text: "y" }],
+      messages: [],
+    });
+    expect(o.messages).toEqual([{ role: "system", content: "x\n\ny" }]);
+    const a = openaiReqToAnthropic({ model: "m", messages: [{ role: "assistant", content: null }, { role: "user", content: "q" }] });
+    expect(a.messages).toEqual([{ role: "user", content: "q" }]);
+  });
+
+  it("tool_choice maps both directions", () => {
+    const base: OpenAIChatReq = { model: "m", messages: [] };
+    for (const [oa, an] of [["auto", { type: "auto" }], ["none", { type: "none" }], ["required", { type: "any" }]] as const) {
+      const a = openaiReqToAnthropic({ ...base, tool_choice: oa });
+      expect(a.tool_choice).toEqual(an);
+      expect(anthropicReqToOpenai(a).tool_choice).toBe(oa);
+    }
+  });
+
+  it("invalid tool arguments fall back to {}", () => {
+    const a = openaiReqToAnthropic({
+      model: "m",
+      messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "f", arguments: "{oops" } }] }],
+    });
+    expect(a.messages[0].content).toEqual([{ type: "tool_use", id: "c", name: "f", input: {} }]);
+  });
+
+  it("tool_result with array content flattens to text", () => {
+    const o = anthropicReqToOpenai({
+      model: "m",
+      max_tokens: 1,
+      messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "c", content: [{ type: "text", text: "a" }, { type: "text", text: "b" }] }] }],
+    });
+    expect(o.messages).toEqual([{ role: "tool", tool_call_id: "c", content: "ab" }]);
+  });
+
+  it("assistant text plus tool_calls keeps order in both directions", () => {
+    const a = openaiReqToAnthropic({
+      model: "m",
+      messages: [
+        {
+          role: "assistant",
+          content: "thinking",
+          tool_calls: [
+            { id: "1", type: "function", function: { name: "f", arguments: "{}" } },
+            { id: "2", type: "function", function: { name: "g", arguments: "{}" } },
+          ],
+        },
+      ],
+    });
+    expect(a.messages[0].content).toEqual([
+      { type: "text", text: "thinking" },
+      { type: "tool_use", id: "1", name: "f", input: {} },
+      { type: "tool_use", id: "2", name: "g", input: {} },
+    ]);
+    const o = anthropicReqToOpenai(a);
+    expect(o.messages[0].content).toBe("thinking");
+    expect(o.messages[0].tool_calls?.map((t) => t.id)).toEqual(["1", "2"]);
+  });
+
+  it("reverse stop mapping, stop_sequence, and id generation", () => {
+    const res = (finish_reason: "stop" | "length" | "tool_calls") => ({
+      model: "m",
+      choices: [{ index: 0, message: { role: "assistant" as const, content: "x" }, finish_reason }],
+    });
+    expect(openaiResToAnthropic(res("stop")).stop_reason).toBe("end_turn");
+    expect(openaiResToAnthropic(res("length")).stop_reason).toBe("max_tokens");
+    expect(openaiResToAnthropic(res("stop")).id).toMatch(/^msg_/);
+    const o = anthropicResToOpenai({ model: "m", content: [{ type: "text", text: "x" }], stop_reason: "stop_sequence" });
+    expect(o.choices[0].finish_reason).toBe("stop");
+    expect(o.id).toMatch(/^chatcmpl_/);
+  });
 });

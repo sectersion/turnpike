@@ -52,8 +52,9 @@ export function openaiReqToAnthropic(r: OpenAIChatReq): AnthropicReq {
   const system: string[] = [];
   const messages: AnthropicMessage[] = [];
   for (const m of r.messages) {
-    if (m.role === "system") {
-      system.push(typeof m.content === "string" ? m.content : text(contentToBlocks(m.content)));
+    if (m.role === "system" || m.role === "developer") {
+      const t = typeof m.content === "string" ? m.content : text(contentToBlocks(m.content));
+      if (t) system.push(t);
     } else if (m.role === "tool") {
       const block: AnthropicBlock = {
         type: "tool_result",
@@ -73,10 +74,9 @@ export function openaiReqToAnthropic(r: OpenAIChatReq): AnthropicReq {
       }
       messages.push({ role: "assistant", content: blocks });
     } else {
-      messages.push({
-        role: m.role as "user" | "assistant",
-        content: typeof m.content === "string" ? m.content : contentToBlocks(m.content),
-      });
+      const content = typeof m.content === "string" ? m.content : contentToBlocks(m.content);
+      // Omit messages with no content (e.g. assistant content:null); Anthropic rejects empty blocks.
+      if (content.length) messages.push({ role: m.role as "user" | "assistant", content });
     }
   }
   const out: AnthropicReq = { model: r.model, messages, max_tokens: r.max_tokens ?? 4096 };

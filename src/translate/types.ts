@@ -11,7 +11,7 @@ export interface OAIToolCall {
 }
 
 export interface OAIMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  role: "system" | "developer" | "user" | "assistant" | "tool";
   content?: string | null | OAIPart[];
   tool_calls?: OAIToolCall[];
   tool_call_id?: string;
