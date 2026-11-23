@@ -10,6 +10,7 @@ import type {
   OpenAIChatReq,
   OpenAIChatRes,
 } from "./types";
+import type { Usage } from "../usage";
 
 const DATA_URI = /^data:([^;,]+);base64,(.*)$/s;
 
@@ -160,11 +161,8 @@ export function anthropicResToOpenai(r: AnthropicRes): OpenAIChatRes {
     choices: [{ index: 0, message, finish_reason: r.stop_reason ? (FINISH[r.stop_reason] ?? "stop") : null }],
   };
   if (r.usage) {
-    out.usage = {
-      prompt_tokens: r.usage.input_tokens,
-      completion_tokens: r.usage.output_tokens,
-      total_tokens: r.usage.input_tokens + r.usage.output_tokens,
-    };
+    const u = r.usage;
+    out.usage = openaiUsage(u.input_tokens, u.output_tokens, u.cache_creation_input_tokens ?? 0, u.cache_read_input_tokens ?? 0);
   }
   return out;
 }
@@ -191,10 +189,40 @@ export function openaiResToAnthropic(r: OpenAIChatRes): AnthropicRes {
   return out;
 }
 
-export function extractUsage(res: unknown): { inputTokens: number; outputTokens: number } | null {
-  const u = (res as { usage?: Record<string, unknown> } | null)?.usage;
-  if (!u || typeof u !== "object") return null;
-  const i = u.prompt_tokens ?? u.input_tokens;
-  const o = u.completion_tokens ?? u.output_tokens;
-  return typeof i === "number" && typeof o === "number" ? { inputTokens: i, outputTokens: o } : null;
+export type UsageFields = { i?: number; o?: number; cw?: number; cr?: number };
+
+// Anthropic's input_tokens excludes cache_creation/cache_read_input_tokens. OpenAI's prompt_tokens includes
+// cached tokens (charged here at the full input price, which overcharges: safe). Our own Anthropic->OpenAI
+// translation also carries the Anthropic cache fields, so their share of prompt_tokens is priced at cache rates.
+export function usageFields(u: any): UsageFields {
+  if (!u || typeof u !== "object") return {};
+  const n = (v: unknown) => (typeof v === "number" && v >= 0 ? v : undefined);
+  const cw = n(u.cache_creation_input_tokens);
+  const cr = n(u.cache_read_input_tokens);
+  if (u.prompt_tokens !== undefined || u.completion_tokens !== undefined) {
+    const p = n(u.prompt_tokens);
+    return { i: p === undefined ? undefined : Math.max(0, p - (cw ?? 0) - (cr ?? 0)), o: n(u.completion_tokens), cw, cr };
+  }
+  return { i: n(u.input_tokens), o: n(u.output_tokens), cw, cr };
+}
+
+export const toUsage = (i: number, o: number, cw = 0, cr = 0): Usage => ({
+  inputTokens: i,
+  outputTokens: o,
+  ...(cw ? { cacheWriteTokens: cw } : {}),
+  ...(cr ? { cacheReadTokens: cr } : {}),
+});
+
+// OpenAI-shaped usage for a translated Anthropic response: prompt_tokens includes the cache tokens.
+export const openaiUsage = (i: number, o: number, cw = 0, cr = 0) => ({
+  prompt_tokens: i + cw + cr,
+  completion_tokens: o,
+  total_tokens: i + cw + cr + o,
+  ...(cw ? { cache_creation_input_tokens: cw } : {}),
+  ...(cr ? { cache_read_input_tokens: cr, prompt_tokens_details: { cached_tokens: cr } } : {}),
+});
+
+export function extractUsage(res: unknown): Usage | null {
+  const f = usageFields((res as { usage?: unknown } | null)?.usage);
+  return f.i !== undefined && f.o !== undefined ? toUsage(f.i, f.o, f.cw, f.cr) : null;
 }

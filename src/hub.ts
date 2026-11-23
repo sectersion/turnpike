@@ -3,6 +3,7 @@ import { newSecret, sha256Hex } from "./crypto";
 import { costUsd, priceFor, refreshOpenRouterPrices, type Price } from "./pricing";
 import type { Account, AccountKind, Combo, RouterKey } from "./types";
 import type { Env } from "./env";
+import type { Usage } from "./usage";
 import { getProvider, type OAuthTokens } from "./oauth";
 
 export type LimitReason = "key_daily" | "key_monthly" | "account_monthly" | "rpm" | "tpm" | "cooldown" | "unpriced";
@@ -21,7 +22,8 @@ type ResRow = {
 };
 
 const MINUTE = 60_000;
-const LEAK_MS = 10 * MINUTE;
+const LEAK_MS = 60 * MINUTE; // a reservation this old is charged at its estimate (the request may still be running)
+const SWEPT_KEEP_MS = 24 * 60 * MINUTE; // how long a late settle may still correct a swept reservation
 const DAY = 86_400_000;
 const RETRY_MS = 5 * MINUTE; // empty price cache after a failed refresh
 const SKEW_MS = 60_000; // refresh OAuth tokens this long before they expire
@@ -66,6 +68,7 @@ export class Hub extends DurableObject<Env> {
         CREATE TABLE IF NOT EXISTS reservations (
           id TEXT PRIMARY KEY, key_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL, ts INTEGER NOT NULL,
           est_tokens INTEGER NOT NULL, est_out INTEGER NOT NULL, est_cost_usd REAL NOT NULL, priced INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS swept (id TEXT PRIMARY KEY, ledger_rowid INTEGER NOT NULL, ts INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS cooldowns (account_id TEXT PRIMARY KEY, until_ms INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS prices (model TEXT PRIMARY KEY, in_per_m REAL NOT NULL, out_per_m REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS price_overrides (model TEXT PRIMARY KEY, in_per_m REAL NOT NULL, out_per_m REAL NOT NULL);`);
@@ -120,7 +123,7 @@ export class Hub extends DurableObject<Env> {
     const now = i.now ?? Date.now();
     const estIn = Math.max(0, Math.ceil(i.estTokens) || 0);
     const estOut = typeof i.maxOutTokens === "number" && i.maxOutTokens >= 0 ? Math.ceil(i.maxOutTokens) : 1024;
-    this.sql.exec("DELETE FROM reservations WHERE ts < ?", now - LEAK_MS);
+    this.sweep(now);
     const num = (q: string, ...b: unknown[]) => (this.sql.exec<{ n: number | null }>(q, ...b).one().n ?? 0);
 
     const cd = this.sql.exec<{ until_ms: number }>("SELECT until_ms FROM cooldowns WHERE account_id = ?", i.accountId).toArray()[0];
@@ -167,14 +170,43 @@ export class Hub extends DurableObject<Env> {
     return { ok: true, reservationId: id };
   }
 
-  // Idempotent: an unknown or already-settled id is a no-op.
-  async settle(reservationId: string, u: { inputTokens: number; outputTokens: number } | null, now = Date.now()): Promise<void> {
+  // Stale reservations (request still running past LEAK_MS, or its settle never arrived) are charged at
+  // their estimate, never dropped; `swept` remembers the row so a late settle can replace it once.
+  private sweep(now: number) {
+    for (const r of this.sql.exec<ResRow>("DELETE FROM reservations WHERE ts < ? RETURNING *", now - LEAK_MS).toArray()) {
+      const row = this.sql
+        .exec<{ id: number }>(
+          "INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING rowid AS id",
+          r.ts, r.key_id, r.account_id, r.model, r.est_tokens, r.est_out, r.est_cost_usd, r.priced,
+        )
+        .one();
+      this.sql.exec("INSERT OR REPLACE INTO swept VALUES (?, ?, ?)", r.id, row.id, r.ts);
+    }
+    this.sql.exec("DELETE FROM swept WHERE ts < ?", now - SWEPT_KEEP_MS);
+  }
+
+  private costOf(accountId: string, model: string, u: Usage): { inT: number; cost: number } {
+    const acc = this.accountSync(accountId);
+    const price = acc && SUBSCRIPTION.has(acc.kind) ? null : priceFor(model, this.priceTable("price_overrides"), this.orTable);
+    const cw = u.cacheWriteTokens ?? 0, cr = u.cacheReadTokens ?? 0;
+    return { inT: u.inputTokens + cw + cr, cost: price ? costUsd(price, u.inputTokens, u.outputTokens, cw, cr) : 0 };
+  }
+
+  // Idempotent: an unknown or already-settled id is a no-op. A swept reservation's estimate row is
+  // replaced by the actual usage (once).
+  async settle(reservationId: string, u: Usage | null, now = Date.now()): Promise<void> {
     const r = this.takeReservation(reservationId);
-    if (!r) return;
-    const acc = this.accountSync(r.account_id);
-    const price = acc && SUBSCRIPTION.has(acc.kind) ? null : priceFor(r.model, this.priceTable("price_overrides"), this.orTable);
-    const [inT, outT] = u ? [u.inputTokens, u.outputTokens] : [r.est_tokens, r.est_out];
-    const cost = u ? (price ? costUsd(price, inT, outT) : 0) : r.est_cost_usd;
+    if (!r) {
+      const s = this.sql.exec<{ ledger_rowid: number }>("DELETE FROM swept WHERE id = ? RETURNING ledger_rowid", reservationId).toArray()[0];
+      if (!s || !u) return;
+      const row = this.sql.exec<{ account_id: string; model: string }>("SELECT account_id, model FROM ledger WHERE rowid = ?", s.ledger_rowid).toArray()[0];
+      if (!row) return;
+      const { inT, cost } = this.costOf(row.account_id, row.model, u);
+      this.sql.exec("UPDATE ledger SET in_tokens = ?, out_tokens = ?, cost_usd = ? WHERE rowid = ?", inT, u.outputTokens, cost, s.ledger_rowid);
+      return;
+    }
+    const { inT, cost } = u ? this.costOf(r.account_id, r.model, u) : { inT: r.est_tokens, cost: r.est_cost_usd };
+    const outT = u ? u.outputTokens : r.est_out;
     this.sql.exec("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?)", now, r.key_id, r.account_id, r.model, inT, outT, cost, r.priced);
   }
 

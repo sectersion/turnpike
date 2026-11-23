@@ -37,7 +37,7 @@ export interface OpenAIChatRes {
   created?: number;
   model: string;
   choices: { index: number; message: OAIMessage; finish_reason: OAIFinishReason | null }[];
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; [k: string]: unknown };
 }
 
 export type AnthropicBlock =
@@ -76,5 +76,5 @@ export interface AnthropicRes {
   model: string;
   content: AnthropicBlock[];
   stop_reason: AnthropicStopReason | null;
-  usage?: { input_tokens: number; output_tokens: number };
+  usage?: { input_tokens: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number };
 }

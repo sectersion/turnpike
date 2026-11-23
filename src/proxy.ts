@@ -6,7 +6,7 @@ import { explainEmpty, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
 import { usageTap } from "./translate/stream";
 import type { Account } from "./types";
-import { recordUsage } from "./usage";
+import { recordUsage, type Usage } from "./usage";
 
 export const proxy = new Hono<AppEnv>();
 
@@ -82,7 +82,7 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
   const winner = win.t;
   const reservationId = win.rid;
 
-  const rec = (usage: { inputTokens: number; outputTokens: number } | null) =>
+  const rec = (usage: Usage | null) =>
     recordUsage(c.env, { keyId: key.id, accountId: winner.account.id, model: winner.model, reservationId, usage });
 
   if (body.stream === true && res.body) {

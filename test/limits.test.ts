@@ -110,11 +110,26 @@ describe("limits", () => {
     expect((await h.usageSummary(0)).byAccount[0]).toMatchObject({ requests: 1, inTokens: 100, outTokens: 50, costUsd: 0 });
   });
 
-  it("leaked reservation older than 10 minutes stops counting", async () => {
-    const { r } = await setup({ dailyUsd: 0.15 });
+  it("C2: a reservation older than the sweep window becomes a ledger row at its estimate", async () => {
+    const { h, k, r } = await setup({ dailyUsd: 0.15 });
     expect((await r(T)).ok).toBe(true);
     expect((await r(T + 1)).ok).toBe(false);
-    expect((await r(T + 10 * MIN + 1)).ok).toBe(true);
+    // swept after an hour, but still charged: the cap stays reached
+    expect(await r(T + 60 * MIN + 1)).toEqual({ ok: false, reason: "key_daily" });
+    const row = (await h.usageSummary(0)).byKey.find((x) => x.id === k.id);
+    expect(row).toMatchObject({ requests: 1, inTokens: 1, outTokens: 1024 });
+    expect(row!.costUsd).toBeCloseTo(0.1);
+  });
+
+  it("C2: a late settle for a swept reservation records actual usage exactly once", async () => {
+    const { h, k, r } = await setup();
+    const rid = id(await r(T));
+    expect((await r(T + 60 * MIN + 1)).ok).toBe(true); // sweeps rid into the ledger at its estimate
+    await h.settle(rid, { inputTokens: 3, outputTokens: 0 }, T + 61 * MIN);
+    await h.settle(rid, { inputTokens: 3, outputTokens: 0 }, T + 62 * MIN);
+    const row = (await h.usageSummary(0)).byKey.find((x) => x.id === k.id)!;
+    expect(row).toMatchObject({ requests: 1, inTokens: 3, outTokens: 0 }); // the second (live) reservation is unsettled
+    expect(row.costUsd).toBeCloseTo(0.3);
   });
 
   it("null account limits mean unlimited", async () => {

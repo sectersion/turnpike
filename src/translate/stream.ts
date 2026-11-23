@@ -1,6 +1,7 @@
 // Streaming SSE translation between Anthropic and OpenAI, plus a usage tap.
+import type { Usage } from "../usage";
+import { openaiUsage, toUsage, usageFields } from "./openai-anthropic";
 
-type Usage = { inputTokens: number; outputTokens: number };
 type SseEvent = { event?: string; data: string };
 type Emit = (s: string) => void;
 
@@ -72,6 +73,8 @@ export function anthropicSseToOpenaiSse(): TransformStream<Uint8Array, Uint8Arra
   let model = "";
   let inTok = 0;
   let outTok = 0;
+  let cw = 0;
+  let cr = 0;
   let finished = false; // usage chunk + [DONE] sent
   const toolOrdinal = new Map<number, number>();
   const chunk = (choices: unknown[], extra: object = {}) =>
@@ -80,7 +83,7 @@ export function anthropicSseToOpenaiSse(): TransformStream<Uint8Array, Uint8Arra
   const finish = (emit: Emit) => {
     if (finished) return;
     finished = true;
-    emit(chunk([], { usage: { prompt_tokens: inTok, completion_tokens: outTok, total_tokens: inTok + outTok } }));
+    emit(chunk([], { usage: openaiUsage(inTok, outTok, cw, cr) }));
     emit("data: [DONE]\n\n");
   };
 
@@ -94,6 +97,8 @@ export function anthropicSseToOpenaiSse(): TransformStream<Uint8Array, Uint8Arra
           model = d.message?.model ?? model;
           inTok = d.message?.usage?.input_tokens ?? 0;
           outTok = d.message?.usage?.output_tokens ?? 0;
+          cw = d.message?.usage?.cache_creation_input_tokens ?? 0;
+          cr = d.message?.usage?.cache_read_input_tokens ?? 0;
           emit(delta({ role: "assistant" }));
           break;
         case "content_block_start":
@@ -110,6 +115,9 @@ export function anthropicSseToOpenaiSse(): TransformStream<Uint8Array, Uint8Arra
           break;
         case "message_delta":
           outTok = d.usage?.output_tokens ?? outTok;
+          inTok = d.usage?.input_tokens ?? inTok;
+          cw = d.usage?.cache_creation_input_tokens ?? cw;
+          cr = d.usage?.cache_read_input_tokens ?? cr;
           if (d.delta?.stop_reason) emit(delta({}, FINISH[d.delta.stop_reason] ?? "stop"));
           break;
         case "message_stop":
@@ -192,28 +200,24 @@ export function openaiSseToAnthropicSse(model: string): TransformStream<Uint8Arr
 }
 
 export function usageTap(onUsage: (u: Usage | null) => void): TransformStream<Uint8Array, Uint8Array> {
-  let inTok: number | undefined;
-  let outTok: number | undefined;
+  let seen: { i?: number; o?: number; cw?: number; cr?: number } = {};
   let reported = false;
   const report = () => {
     if (reported) return;
     reported = true;
-    onUsage(inTok === undefined && outTok === undefined ? null : { inputTokens: inTok ?? 0, outputTokens: outTok ?? 0 });
+    const { i, o, cw, cr } = seen;
+    onUsage(i === undefined && o === undefined ? null : toUsage(i ?? 0, o ?? 0, cw, cr));
+  };
+  const merge = (u: unknown) => {
+    const f = usageFields(u);
+    seen = { i: f.i ?? seen.i, o: f.o ?? seen.o, cw: f.cw ?? seen.cw, cr: f.cr ?? seen.cr };
   };
   const p = sseParser(({ data }) => {
     const d = tryJson(data);
     if (!d) return;
-    if (d.type === "message_start" && d.message?.usage) {
-      inTok = d.message.usage.input_tokens ?? inTok;
-      outTok = d.message.usage.output_tokens ?? outTok;
-    } else if (d.type === "message_delta" && d.usage) {
-      inTok = d.usage.input_tokens ?? inTok;
-      outTok = d.usage.output_tokens ?? outTok;
-    }
-    else if (d.usage && typeof d.usage.prompt_tokens === "number") {
-      inTok = d.usage.prompt_tokens;
-      outTok = d.usage.completion_tokens ?? 0;
-    }
+    if (d.type === "message_start" && d.message?.usage) merge(d.message.usage);
+    else if (d.type === "message_delta" && d.usage) merge(d.usage);
+    else if (d.usage && typeof d.usage.prompt_tokens === "number") merge({ completion_tokens: 0, ...d.usage });
   });
   const ts = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, ctrl) {
