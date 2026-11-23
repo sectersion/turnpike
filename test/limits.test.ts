@@ -1,4 +1,5 @@
-import { createExecutionContext, env, waitOnExecutionContext } from "cloudflare:test";
+import { createExecutionContext, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
+import type { Hub } from "../src/hub";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import app from "../src/index";
 import { hub as mainHub } from "../src/hub-client";
@@ -116,6 +117,27 @@ describe("limits", () => {
     expect((await r(T + 10 * MIN + 1)).ok).toBe(true);
   });
 
+  it("null account limits mean unlimited", async () => {
+    const { r } = await setup({}, { rpm: null, tpm: null, monthlyUsd: null } as unknown as Partial<Account>);
+    expect((await r()).ok).toBe(true);
+  });
+
+  it("price refresh alarm retries in ~5 minutes when empty, ~24h after success", async () => {
+    const h = env.HUB.get(env.HUB.idFromName("alarm-" + crypto.randomUUID()));
+    const next = async () =>
+      runInDurableObject(h, async (inst: Hub, state) => {
+        await inst.alarm();
+        return ((await state.storage.getAlarm()) ?? 0) - Date.now();
+      });
+    const f = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("down", { status: 503 }));
+    const empty = await next();
+    expect(empty).toBeGreaterThan(4 * MIN);
+    expect(empty).toBeLessThanOrEqual(5 * MIN);
+    f.mockImplementation(async () => Response.json({ data: [{ id: "x/y", pricing: { prompt: "0.000001", completion: "0.000002" } }] }));
+    expect(await next()).toBeGreaterThan(23 * 60 * MIN);
+    f.mockRestore();
+  });
+
   it("estimateTokens and retryAfterMs", () => {
     expect(estimateTokens({})).toBe(1);
     expect(estimateTokens({ messages: [{ role: "user", content: "x".repeat(400) }] })).toBeGreaterThan(100);
@@ -174,6 +196,23 @@ describe("limits through the proxy", () => {
     const { byAccount } = await h.usageSummary(0);
     expect(byAccount.find((r) => r.id === a.id)).toBeUndefined();
     expect(byAccount.find((r) => r.id === b.id)).toMatchObject({ requests: 1, inTokens: 7, outTokens: 3 });
+  });
+
+  it("a network error on A then a gated B releases A's reservation", async () => {
+    const h = mainHub(env);
+    const [a, b] = [await acc("lim-la"), await acc("lim-lb")];
+    await h.setPriceOverride("lim-leak-m", { inPerM: 100_000, outPerM: 0 }); // $0.10/token; the request estimates 8 tokens = $0.80
+    await h.setCooldown(b.id, Date.now() + 60 * MIN);
+    await h.upsertCombo({ name: "lim-leak", targets: [{ accountId: a.id, model: "lim-leak-m" }, { accountId: b.id, model: "lim-leak-m" }] });
+    const { secret, key } = await h.createKey({ name: "leak", dailyUsd: 1 });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw new Error("net down");
+    });
+    const res = await call(secret, "lim-leak");
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({ error: { message: "limit: cooldown", type: "rate_limit" } });
+    // $0.50 fits under the $1 cap only if A's $0.80 reservation was released
+    expect((await h.reserve({ keyId: key.id, accountId: a.id, model: "lim-leak-m", estTokens: 5, maxOutTokens: 0 })).ok).toBe(true);
   });
 
   it("an upstream 429 puts the account in cooldown and is not billed", async () => {

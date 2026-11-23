@@ -72,10 +72,9 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
     gate,
   );
   const win = attempts.find((a) => a.r === res);
-  if (!win && gated) return fail(format, 429, "rate_limit", `limit: ${gated}`);
-
   // Every attempt reached (or tried to reach) upstream: all but a successful winner are released, still counting toward rpm.
   for (const a of attempts) if (a.rid && (a !== win || !res.ok)) bg(() => h.release(a.rid!));
+  if (!win && gated) return fail(format, 429, "rate_limit", `limit: ${gated}`);
   if (!res.ok || !win?.rid) return res;
   const winner = win.t;
   const reservationId = win.rid;

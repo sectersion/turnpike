@@ -22,6 +22,7 @@ type ResRow = {
 const MINUTE = 60_000;
 const LEAK_MS = 10 * MINUTE;
 const DAY = 86_400_000;
+const RETRY_MS = 5 * MINUTE; // empty price cache after a failed refresh
 const SUBSCRIPTION = new Set<AccountKind>(["claude-oauth", "codex-oauth", "copilot-oauth"]);
 
 type KeyRow = {
@@ -90,7 +91,7 @@ export class Hub extends DurableObject<Env> {
         this.orTable = t;
       }
     } catch {}
-    await this.ctx.storage.setAlarm(Date.now() + DAY);
+    await this.ctx.storage.setAlarm(Date.now() + (Object.keys(this.orTable).length ? DAY : RETRY_MS));
   }
 
   async setPriceOverride(model: string, p: Price): Promise<void> {
@@ -122,13 +123,13 @@ export class Hub extends DurableObject<Env> {
 
     const acc = this.accountSync(i.accountId);
     const since = now - MINUTE;
-    if (acc?.rpm !== undefined) {
+    if (acc?.rpm != null) {
       const n =
         num("SELECT COUNT(*) AS n FROM ledger WHERE account_id = ? AND ts > ?", i.accountId, since) +
         num("SELECT COUNT(*) AS n FROM reservations WHERE account_id = ? AND ts > ?", i.accountId, since);
       if (n + 1 > acc.rpm) return { ok: false, reason: "rpm" };
     }
-    if (acc?.tpm !== undefined) {
+    if (acc?.tpm != null) {
       const n =
         num("SELECT SUM(in_tokens + out_tokens) AS n FROM ledger WHERE account_id = ? AND ts > ?", i.accountId, since) +
         num("SELECT SUM(est_tokens) AS n FROM reservations WHERE account_id = ? AND ts > ?", i.accountId, since);
@@ -150,7 +151,7 @@ export class Hub extends DurableObject<Env> {
       est;
     if (key?.daily_usd != null && spend("key_id", i.keyId, dayStart) > key.daily_usd) return { ok: false, reason: "key_daily" };
     if (key?.monthly_usd != null && spend("key_id", i.keyId, monthStart) > key.monthly_usd) return { ok: false, reason: "key_monthly" };
-    if (acc?.monthlyUsd !== undefined && spend("account_id", i.accountId, monthStart) > acc.monthlyUsd)
+    if (acc?.monthlyUsd != null && spend("account_id", i.accountId, monthStart) > acc.monthlyUsd)
       return { ok: false, reason: "account_monthly" };
 
     const id = crypto.randomUUID();
