@@ -138,7 +138,7 @@ Sharing a subscription login (GitHub Copilot) with other people through router k
 
 ## Known limitations and unverified items
 
-- The default base URLs for `openrouter`, `opencode-zen` and `opencode-go` carry `TODO(verify)` in `src/providers.ts` and have not been confirmed against provider docs. Set a base URL on the account if they are wrong.
+- The default base URLs for `openrouter`, `opencode-zen` and `opencode-go` were checked against provider docs on 2026-11-23, but no real chat request has been made to OpenCode Zen or Go. `opencode-go` sends the account id as the required `x-opencode-session` header. Set a base URL on the account if the defaults are wrong.
 - The Copilot client ID, token exchange and editor headers are undocumented and were taken from open-source clients (see the header comment in `src/oauth/copilot.ts`). No live Copilot call has been made; live OAuth has to be tried by hand once.
 - The dashboard has only a manual smoke script (`test/dashboard-smoke.md`). No real `wrangler deploy` has been run as part of writing this README.
 - `GET /v1/models` lists combos only.
