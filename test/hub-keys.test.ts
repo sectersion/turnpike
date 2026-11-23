@@ -1,6 +1,5 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Account } from "../src/types";
 
 const hub = () => env.HUB.get(env.HUB.idFromName("test-" + crypto.randomUUID()));
 
@@ -37,12 +36,11 @@ describe("hub keys", () => {
 
   it('listAccounts(true) redacts secret to "***"', async () => {
     const h = hub();
-    // RPC typing maps `secret: unknown` to never, so cast the results
-    const a = (await h.upsertAccount(acct("a"))) as unknown as Account;
+    const a = await h.upsertAccount(acct("a"));
     expect(a.enabled).toBe(true);
-    expect(((await h.listAccounts(true)) as unknown as Account[])[0].secret).toBe("***");
-    expect(((await h.listAccounts(false)) as unknown as Account[])[0].secret).toEqual({ apiKey: "sk-real" });
-    expect(((await h.getAccount(a.id)) as unknown as Account | null)?.name).toBe("a");
+    expect((await h.listAccounts(true))[0].secret).toBe("***");
+    expect((await h.listAccounts(false))[0].secret).toEqual({ apiKey: "sk-real" });
+    expect((await h.getAccount(a.id))?.name).toBe("a");
     await h.deleteAccount(a.id);
     expect(await h.getAccount(a.id)).toBeNull();
   });
@@ -53,6 +51,20 @@ describe("hub keys", () => {
     expect(key.allowedAccountIds).toBeNull();
     const r = await h.createKey({ name: "r", allowedAccountIds: ["x"] });
     expect(r.key.allowedAccountIds).toEqual(["x"]);
+  });
+
+  it("allowedAccountIds: [] round-trips as [] (none), not null", async () => {
+    const h = hub();
+    const { key, secret } = await h.createKey({ name: "k", allowedAccountIds: [] });
+    expect(key.allowedAccountIds).toEqual([]);
+    expect((await h.resolveKey(secret))?.allowedAccountIds).toEqual([]);
+  });
+
+  it("listKeys still lists a revoked key with revoked: true", async () => {
+    const h = hub();
+    const { key } = await h.createKey({ name: "k" });
+    await h.revokeKey(key.id);
+    expect(await h.listKeys()).toEqual([{ ...key, revoked: true }]);
   });
 
   it("combos round trip", async () => {

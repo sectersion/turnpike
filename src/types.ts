@@ -17,13 +17,18 @@ export type RouterKey = {
   revoked: boolean;
 };
 
+export type AccountSecret =
+  | string // plain API key, or the "***" redaction placeholder
+  | { apiKey: string }
+  | { accessToken: string; refreshToken?: string; expiresAt?: number; [k: string]: string | number | undefined };
+
 export type Account = {
   id: string;
   kind: AccountKind;
   name: string;
   baseUrl?: string;
   authType: "apikey" | "oauth";
-  secret: unknown;
+  secret: AccountSecret;
   rpm?: number;
   tpm?: number;
   monthlyUsd?: number;
