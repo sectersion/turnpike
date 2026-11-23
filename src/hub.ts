@@ -25,7 +25,9 @@ const LEAK_MS = 10 * MINUTE;
 const DAY = 86_400_000;
 const RETRY_MS = 5 * MINUTE; // empty price cache after a failed refresh
 const SKEW_MS = 60_000; // refresh OAuth tokens this long before they expire
-const SUBSCRIPTION = new Set<AccountKind>(["claude-oauth", "codex-oauth", "copilot-oauth"]);
+const RETRY_COOLDOWN_MS = MINUTE; // refresh failed on network/5xx
+const REJECTED_COOLDOWN_MS = 15 * MINUTE; // refresh rejected (400/401-style)
+const SUBSCRIPTION = new Set<AccountKind>(["codex-oauth", "copilot-oauth"]);
 
 type KeyRow = {
   id: string;
@@ -264,8 +266,16 @@ export class Hub extends DurableObject<Env> {
     return this.accountSync(id);
   }
 
-  // Single-flight per account; rotated tokens are written before any caller sees them. A failed
-  // refresh leaves the stored tokens untouched. Never log tokens here.
+  // Only headers cross the RPC boundary, never the stored (long-lived) tokens.
+  async getAuthHeaders(accountId: string): Promise<Record<string, string>> {
+    const provider = getProvider(this.accountSync(accountId)?.kind ?? "");
+    if (!provider) throw new Error("oauth executor not implemented");
+    return provider.headers(await this.getFreshToken(accountId));
+  }
+
+  // Single-flight per account; rotated tokens are written before any caller sees them. The write is
+  // a compare-and-swap on refreshToken, so an edit made during the refresh wins. A failed refresh
+  // leaves the stored tokens untouched and cools the account down. Never log tokens here.
   async getFreshToken(accountId: string): Promise<OAuthTokens> {
     const acc = this.accountSync(accountId);
     const t = acc?.secret;
@@ -280,10 +290,18 @@ export class Hub extends DurableObject<Env> {
       try {
         next = await provider.refresh(t);
       } catch (e) {
+        // A 4xx (bar 429) means the grant was rejected: retrying soon won't help.
+        const s = (e as { status?: unknown }).status;
+        const rejected = typeof s === "number" && s >= 400 && s < 500 && s !== 429;
+        await this.setCooldown(accountId, Date.now() + (rejected ? REJECTED_COOLDOWN_MS : RETRY_COOLDOWN_MS));
         throw new Error(`token refresh failed for account ${accountId}: ${e instanceof Error ? e.message : String(e)}`);
       }
       const cur = this.accountSync(accountId); // re-read: don't clobber edits made during the refresh
-      if (cur) this.sql.exec("UPDATE accounts SET data = ? WHERE id = ?", JSON.stringify({ ...cur, secret: next }), accountId);
+      if (!cur) return next;
+      const s = cur.secret;
+      if (typeof s !== "object" || !("accessToken" in s)) throw new Error("account changed during token refresh");
+      if (s.refreshToken !== t.refreshToken) return s;
+      this.sql.exec("UPDATE accounts SET data = ? WHERE id = ?", JSON.stringify({ ...cur, secret: next }), accountId);
       return next;
     })().finally(() => this.refreshing.delete(accountId));
     this.refreshing.set(accountId, p);

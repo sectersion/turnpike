@@ -4,7 +4,6 @@ export type AccountKind =
   | "opencode-go"
   | "custom-openai"
   | "custom-anthropic"
-  | "claude-oauth"
   | "codex-oauth"
   | "copilot-oauth";
 

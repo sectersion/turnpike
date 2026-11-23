@@ -1,7 +1,6 @@
 import { Hono } from "hono";
 import type { AppEnv } from "./auth";
 import { hub } from "./hub-client";
-import { getProvider } from "./oauth";
 import type { Format, Target } from "./providers";
 import { explainEmpty, resolveTargets, routeWithFallback } from "./router";
 import { extractUsage } from "./translate/openai-anthropic";
@@ -58,11 +57,7 @@ async function handle(c: import("hono").Context<AppEnv>, format: Format): Promis
     if (!g.ok) gated ??= g.reason;
     return g;
   };
-  const authHeaders = async (a: Account) => {
-    const p = getProvider(a.kind);
-    if (!p) throw new Error("oauth executor not implemented");
-    return p.headers(await h.getFreshToken(a.id));
-  };
+  const authHeaders = (a: Account) => h.getAuthHeaders(a.id);
   const attempts: { t: Target; r: Response | Error; rid?: string }[] = [];
   const res = await routeWithFallback(
     targets,

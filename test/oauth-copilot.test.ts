@@ -105,6 +105,61 @@ describe("Hub.getFreshToken", () => {
     expect((await h.getAccount(a.id))?.secret).toEqual({ accessToken: "cop_old", refreshToken: "gho_long", expiresAt: expect.any(Number) });
   });
 
+  it("an admin overwrite during an in-flight refresh is not clobbered", async () => {
+    const { h, a } = await setup(Date.now() - 1000);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const f = route({
+      [EXCHANGE]: async () => {
+        await gate;
+        return Response.json({ token: "cop_new", expires_at: later(1800) });
+      },
+    });
+    const p = h.getFreshToken(a.id);
+    while (!calls(f, EXCHANGE).length) await new Promise((r) => setTimeout(r, 5));
+    const admin = { accessToken: "cop_admin", refreshToken: "gho_admin", expiresAt: Date.now() + 1e6 };
+    await h.upsertAccount({ ...a, secret: admin });
+    release();
+    expect(await p).toEqual(admin);
+    expect((await h.getAccount(a.id))?.secret).toEqual(admin);
+  });
+
+  it("a failed refresh sets a cooldown that reserve honours until it expires", async () => {
+    for (const [status, ms] of [[401, 15 * 60_000], [400, 15 * 60_000], [503, 60_000]] as const) {
+      const { h, a } = await setup(Date.now() - 1000);
+      route({ [EXCHANGE]: () => new Response("nope", { status }) });
+      const t0 = Date.now();
+      expect(await h.getFreshToken(a.id).then(() => "", (e: Error) => e.message)).toMatch(/refresh failed/);
+      const r = (now: number) => h.reserve({ keyId: "k", accountId: a.id, model: "gpt-4o", estTokens: 1, now });
+      expect(await r(t0 + ms - 5_000)).toEqual({ ok: false, reason: "cooldown" });
+      expect((await r(t0 + ms + 5_000)).ok).toBe(true);
+      vi.restoreAllMocks();
+      route({ [EXCHANGE]: () => Response.json({ token: "cop_new", expires_at: later(1800) }) });
+      expect((await h.getFreshToken(a.id)).accessToken).toBe("cop_new");
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("a network error during refresh sets a 60s cooldown", async () => {
+    const { h, a } = await setup(Date.now() - 1000);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("network down"));
+    const t0 = Date.now();
+    expect(await h.getFreshToken(a.id).then(() => "", (e: Error) => e.message)).toMatch(/refresh failed/);
+    const r = (now: number) => h.reserve({ keyId: "k", accountId: a.id, model: "gpt-4o", estTokens: 1, now });
+    expect(await r(t0 + 55_000)).toEqual({ ok: false, reason: "cooldown" });
+    expect((await r(t0 + 65_000)).ok).toBe(true);
+  });
+
+  it("getAuthHeaders returns headers and no token fields", async () => {
+    const { h, a } = await setup(Date.now() + 1e6);
+    const hd = await h.getAuthHeaders(a.id);
+    expect(hd.Authorization).toBe("Bearer cop_old");
+    expect(hd["Copilot-Integration-Id"]).toBe("vscode-chat");
+    const s = JSON.stringify(hd);
+    expect(s).not.toContain("gho_long");
+    for (const k of ["accessToken", "refreshToken", "expiresAt"]) expect(hd).not.toHaveProperty(k);
+  });
+
   it("token fresh within skew is returned without any fetch", async () => {
     const { h, a } = await setup(Date.now() + 120_000);
     const f = route({});
@@ -126,7 +181,7 @@ describe("admin oauth routes", () => {
     expect((await post("/copilot-oauth/complete", { state: {} }, {})).status).toBe(401);
     expect(f).not.toHaveBeenCalled();
     expect((await post("/openrouter/start", {})).status).toBe(404);
-    expect((await post("/claude-oauth/start", {})).status).toBe(404);
+    expect((await post("/codex-oauth/start", {})).status).toBe(404);
   });
 
   it("complete creates a redacted account", async () => {

@@ -176,7 +176,7 @@ describe("callUpstream translation", () => {
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe("Bearer zz");
   });
   it("oauth kinds are not implemented yet", async () => {
-    await expect(callUpstream({ account: acc("o", "claude-oauth"), model: "m" }, "openai", oai, fakeFetch(json(200)).f)).rejects.toThrow(
+    await expect(callUpstream({ account: acc("o", "codex-oauth"), model: "m" }, "openai", oai, fakeFetch(json(200)).f)).rejects.toThrow(
       "oauth executor not implemented",
     );
   });

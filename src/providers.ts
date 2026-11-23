@@ -17,8 +17,7 @@ export const PROVIDERS: Record<AccountKind, { native: Format; defaultBaseUrl?: s
   "opencode-go": { native: "openai", defaultBaseUrl: "https://opencode.ai/zen/go/v1" },
   "custom-openai": { native: "openai" },
   "custom-anthropic": { native: "anthropic" },
-  "claude-oauth": { native: "anthropic" },
-  "codex-oauth": { native: "openai" },
+  "codex-oauth": { native: "openai" }, // deferred until OpenAI offers an official third-party login usable here; no executor yet
   "copilot-oauth": { native: "openai", defaultBaseUrl: "https://api.githubcopilot.com" }, // verified: see src/oauth/copilot.ts
 };
 
