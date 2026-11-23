@@ -71,6 +71,20 @@ describe("stream translation", () => {
     expect(ev.find((e) => e.event === "message_delta")?.data.delta.stop_reason).toBe("tool_use");
   });
 
+  it("openai->anthropic message_delta carries input and output tokens from the trailing usage chunk", async () => {
+    const src =
+      `data: ${JSON.stringify({ id: "1", choices: [{ index: 0, delta: { content: "hi" } }] })}
+
+` +
+      `data: ${JSON.stringify({ id: "1", choices: [], usage: { prompt_tokens: 3, completion_tokens: 2 } })}
+
+data: [DONE]
+
+`;
+    const ev = anthEvents(await run(openaiSseToAnthropicSse("m"), src));
+    expect(ev.find((e) => e.event === "message_delta")?.data.usage).toEqual({ input_tokens: 3, output_tokens: 2 });
+  });
+
   it("openai stream ends with data: [DONE]", async () => {
     expect((await run(anthropicSseToOpenaiSse(), ANTHROPIC_TEXT)).endsWith("data: [DONE]\n\n")).toBe(true);
     const err = await run(anthropicSseToOpenaiSse(), ANTHROPIC_ERROR);

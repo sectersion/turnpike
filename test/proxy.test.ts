@@ -64,6 +64,7 @@ describe("proxy", () => {
     expect(text).toContain("event: message_stop");
     await done();
     expect(recordUsage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordUsage).mock.calls[0][1]).toMatchObject({ accountId: accId, usage: { inputTokens: 3, outputTokens: 2 } });
   });
 
   it("client abort mid-stream still triggers usage recording", async () => {

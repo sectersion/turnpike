@@ -155,7 +155,7 @@ export function openaiSseToAnthropicSse(model: string): TransformStream<Uint8Arr
     start(emit);
     closed = true;
     closeBlock(emit);
-    emit(ev("message_delta", { delta: { stop_reason: stopReason ?? "end_turn", stop_sequence: null }, usage: { output_tokens: outTok } }));
+    emit(ev("message_delta", { delta: { stop_reason: stopReason ?? "end_turn", stop_sequence: null }, usage: { input_tokens: inTok, output_tokens: outTok } }));
     emit(ev("message_stop", {}));
   };
 
@@ -206,7 +206,10 @@ export function usageTap(onUsage: (u: Usage | null) => void): TransformStream<Ui
     if (d.type === "message_start" && d.message?.usage) {
       inTok = d.message.usage.input_tokens ?? inTok;
       outTok = d.message.usage.output_tokens ?? outTok;
-    } else if (d.type === "message_delta" && d.usage) outTok = d.usage.output_tokens ?? outTok;
+    } else if (d.type === "message_delta" && d.usage) {
+      inTok = d.usage.input_tokens ?? inTok;
+      outTok = d.usage.output_tokens ?? outTok;
+    }
     else if (d.usage && typeof d.usage.prompt_tokens === "number") {
       inTok = d.usage.prompt_tokens;
       outTok = d.usage.completion_tokens ?? 0;
