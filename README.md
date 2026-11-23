@@ -49,8 +49,12 @@ There is no "Deploy to Cloudflare" button; it was not set up or tested.
    - `copilot-oauth` (GitHub Copilot): the dashboard shows a device code and a GitHub URL; approve there and the account is created.
 
    Optional per-account limits: RPM, TPM, monthly USD. Accounts can be disabled or deleted.
-2. **Combos tab, create a combo.** An ordered list of `{account, model}` targets. Requests for the combo name try targets in order and fall through to the next one on a 408, 429 or 5xx (or a network error). You can also skip combos and request `<account name>/<model>` directly (account name matched case-insensitively), for example `openrouter/anthropic/claude-sonnet-4`.
-3. **Keys tab, create a router key.** Name, optional daily and monthly USD caps (UTC day and month), and an account allow-list ("All accounts" or a subset). The secret (prefix `tpk`) is shown once; copy it then.
+2. **Combos tab, create a combo.** An ordered list of `{account, model}` targets. Requests for the combo name try targets in order and fall through to the next one on a 408, 429 or 5xx, on a network error, and on an account-level failure (401, 402, 403, or any 3xx: redirects are never followed). An account-level failure also puts that account in a 15-minute cooldown for every key. You can also skip combos and request `<account name>/<model>` directly (account name matched case-insensitively), for example `openrouter/anthropic/claude-sonnet-4`.
+3. **Keys tab, create a router key.** Name, daily and/or monthly USD caps (UTC day and month) or an explicit "No USD cap" tick, a per-key requests-per-minute limit and a max-in-flight limit (prefilled 30 and 4; clear a field for no limit), and the accounts the key may use. No account is ticked by default; "All API-key accounts" ticks the current non-subscription accounts, and subscription accounts (Copilot) must be ticked one by one. The dashboard always stores an explicit list, so accounts added later are not reachable until you add them. The list shows `UNCAPPED` for keys with no USD cap. The secret (prefix `tpk`) is shown once; copy it then.
+
+   Per-key limits via the API: `POST /admin/keys` takes `rpm` and `maxInFlight` (omitted: 30 and 4; `null`: unlimited); `PATCH /admin/keys/:id` with `{"rpm": 120, "maxInFlight": null}` changes them later. The API itself still accepts a key with no caps and no allow-list (`allowedAccountIds` omitted means every account, including future and subscription ones); only the dashboard enforces the safer defaults.
+
+   **Upgrading an existing deployment:** keys created before these limits existed get 30 rpm and 4 in flight when the Durable Object first starts on the new code (a one-time schema migration). Raise or clear them with `PATCH /admin/keys/:id`.
 4. **Usage tab.** Per-key and per-account requests, tokens and USD for a period, plus manual price overrides per model.
 
 A friend uses the key like this:
@@ -81,22 +85,44 @@ curl $BASE/v1/messages -H "x-api-key: $KEY" -H "content-type: application/json" 
 curl $BASE/v1/models -H "Authorization: Bearer $KEY"
 ```
 
-Errors: 401 bad key, 404 unknown model, 403 model exists but not on this key's allow-list, 429 `limit: <reason>` when every target is blocked by a limit (`key_daily`, `key_monthly`, `account_monthly`, `rpm`, `tpm`, `cooldown`, `unpriced`).
+Errors:
+
+- 401 bad key.
+- 404 unknown model, also when the model exists but is not on this key's allow-list (same message, so names cannot be probed). Unsupported endpoints (`/v1/embeddings`, `/v1/completions`, `/v1/responses`, `/v1/messages/count_tokens`, ...) are a JSON 404 too.
+- 400 for malformed requests, for server-side tools (Anthropic tools with a `type` other than `custom`, such as `web_search_*`, `code_execution_*`, `computer_*`, `bash_*`; OpenAI tools other than `function`), and `limit: unpriced` (a capped key asked for a model with no known price).
+- 429 `limit: <reason>` when every target is blocked by a limit: `key_daily`, `key_monthly`, `key_rpm`, `key_inflight`, `account_monthly`, `rpm`, `tpm`, `cooldown`.
+- Upstream failures: a 400 or 422 from the upstream is passed through (validation messages). 401, 402, 403 and 3xx become 502 `upstream account error`; other upstream errors keep their status with a generic `upstream error (HTTP n)` message; network errors are 502 `upstream failed`. Upstream bodies and headers (org ids, rate-limit headers, cookies, request ids) never reach the client: only `content-type`, `retry-after` and `cache-control` are forwarded.
 
 ## Limits
 
 | Limit | Scope | Behavior |
 |---|---|---|
-| Daily / monthly USD | per router key | Checked before each request against recorded spend, in-flight reservations and the estimated cost of this request. Overshoot is bounded by in-flight estimates. |
+| Daily / monthly USD | per router key | Checked before each request against recorded spend, in-flight reservations and the worst-case cost of this request; the output limit is lowered so that worst case fits what is left (see below). |
+| RPM / max in flight | per router key | Rolling 60 seconds (released and failed attempts count) / unsettled requests. New keys: 30 and 4. |
 | RPM / TPM | per account | Rolling 60 seconds. TPM counts the estimated input tokens (about 4 characters per token) of the request. |
 | Monthly USD | per account | Same check, per account. |
 | Upstream 429 | per account | The account goes into cooldown for the upstream `Retry-After` (seconds or HTTP date; default 30 s, capped at 15 min). The request falls through to the next combo target. |
+| Upstream 401 / 402 / 403 / 3xx | per account | 15-minute cooldown, fall through to the next target. A shorter cooldown never shortens a running longer one. |
 
-Expected output cost is estimated from `max_tokens`, or 1024 tokens if absent, then replaced by the real usage when the response completes (or kept as the estimate if the upstream reports none).
+**Output tokens are enforced, not just estimated.** turnpike sets the upstream output limit itself: the client's `max_completion_tokens` or `max_tokens`, or 4096 if it sent neither, never above 32000. If the key (or the account) has a USD cap, the limit is lowered further so that the request's worst-case cost fits the remaining cap; when fewer than 256 output tokens (or the requested amount, if smaller) would fit, the request is refused with `key_daily`, `key_monthly` or `account_monthly`. The same number is reserved and sent upstream; OpenAI `n` is forced to 1. Anthropic `thinking.budget_tokens` is lowered below the clamped `max_tokens` when needed. Reservations are replaced by the real usage when the response completes, or kept at the estimate if the upstream reports none.
+
+Only known chat fields are forwarded. OpenAI format: `model`, `messages`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `stop`, `stream`, `stream_options`, `tools`, `tool_choice`, `parallel_tool_calls`, `response_format`, `seed`, `frequency_penalty`, `presence_penalty`, `logit_bias`, `logprobs`, `top_logprobs`, `user`, `reasoning_effort`, `n`. Anthropic format: `model`, `messages`, `system`, `max_tokens`, `temperature`, `top_p`, `top_k`, `stop_sequences`, `stream`, `tools`, `tool_choice`, `thinking`, `metadata`. Everything else, notably OpenRouter's `models`, `route`, `provider` and `plugins`, and `service_tier`, `web_search_options`, `audio`/`modalities` and `mcp_servers`, is dropped.
+
+**What a USD cap really bounds.** The output part of every request is hard-capped by the clamp above, and in-flight reservations count against the cap, so concurrent requests cannot jointly exceed it on output. What can still overshoot:
+
+- Input is estimated at about 4 characters per token from `messages` and `system` only (tool definitions are not counted). If the real input is larger, the difference is charged after the fact; with the default 4 requests in flight, the overshoot is at most four requests' worth of under-estimated input.
+- Anthropic prompt caching is priced at 1.25x the input price for cache writes and 0.1x for cache reads (the 5-minute cache). One-hour cache writes cost 2x at Anthropic and are undercharged. OpenAI-format upstreams (OpenRouter) count cached tokens at the full input price, which overcharges.
+- A stream the client cancels before Anthropic's final usage event is charged at least one output token per ~4 streamed characters, an approximation.
+- A request still running after 1 hour, or whose usage never arrives, is charged at its full reservation (clamped output plus input estimate); if its real usage arrives later (within 24 h) it replaces that charge once.
+- Caps do not cover unpriced models (see below), and subscription accounts always cost $0.
 
 Pricing: OpenRouter's public model list (`openrouter.ai/api/v1/models`), refreshed daily by the Durable Object, plus manual overrides (Usage tab or `PUT /admin/prices`). Overrides win. An override matches only the exact model string sent upstream (the part after `<account>/`, or the combo target's `model`), so `gpt-4o` does not price `openai/gpt-4o`. The OpenRouter table matches by full id or by the part after the `/`.
 
-"Unpriced" means no price is known for the model. A key with a daily or monthly USD cap is refused for unpriced models (429 `limit: unpriced`); a key with no cap is not. Add an override, with the exact model string, to price it. Account USD caps (`account_monthly`) likewise do not cover unpriced models, because their recorded cost is 0; put an override on any model you want an account cap to cover. Subscription accounts (GitHub Copilot) count requests and tokens but always cost zero USD.
+"Unpriced" means no price is known for the model. A key with a daily or monthly USD cap is refused for unpriced models (400 `limit: unpriced`); a key with no cap is not. Add an override, with the exact model string, to price it. Account USD caps (`account_monthly`) likewise do not cover unpriced models, because their recorded cost is 0; put an override on any model you want an account cap to cover. Subscription accounts (GitHub Copilot) count requests and tokens but always cost zero USD.
+
+## What is stored
+
+The Durable Object's SQLite holds keys (name, SHA-256 hash, limits), accounts (including provider secrets, see Security), combos, prices, cooldowns, live reservations, and a ledger. Per request the ledger stores: timestamp, key id, account id, model, input and output token counts, cost in USD, and whether the model was priced. No prompts, responses, IP addresses or headers are stored. Ledger rows are kept forever; there is no pruning yet, so the table grows without bound (it is indexed by time, key and account).
 
 ## Security
 
@@ -116,6 +142,8 @@ Sharing a subscription login (GitHub Copilot) with other people through router k
 - The Copilot client ID, token exchange and editor headers are undocumented and were taken from open-source clients (see the header comment in `src/oauth/copilot.ts`). No live Copilot call has been made; live OAuth has to be tried by hand once.
 - The dashboard has only a manual smoke script (`test/dashboard-smoke.md`). No real `wrangler deploy` has been run as part of writing this README.
 - `GET /v1/models` lists combos only.
+- Translation gaps when the client and upstream formats differ: `response_format`, `parallel_tool_calls`, `reasoning_effort` and `thinking` are dropped, thinking deltas are not translated, and `tool_result` `is_error` and images inside tool results are lost.
+- The OpenRouter price table is empty until the Durable Object's first alarm has fetched it (moments after the first request, retried every 5 minutes on failure). Until then capped keys get `limit: unpriced` for anything without a manual override.
 - Combos can be created and overwritten but not deleted; there is no delete route.
 - The test suite is not fully offline: tests that reach `reserve` can trigger a real price-refresh request to openrouter.ai. Some tests also print "uncaught exception ... token refresh failed" lines; these come from deliberately failing refreshes and the run still passes.
 - `@cloudflare/vitest-pool-workers` is a deprecated package name; vitest prints a migration notice.
@@ -132,9 +160,9 @@ npm run typecheck   # tsc --noEmit
 | `src/index.ts` | Hono app: `/health`, `/admin`, `/v1` |
 | `src/auth.ts` | Admin token and router key middleware |
 | `src/admin.ts` | Admin API and input validation |
-| `src/proxy.ts` | `/v1` handlers, usage recording, 429 cooldown |
+| `src/proxy.ts` | `/v1` handlers, usage recording, cooldowns, upstream error and header filtering |
 | `src/router.ts` | Model resolution and fallback loop |
-| `src/providers.ts` | Account kinds, default base URLs, upstream call |
+| `src/providers.ts` | Account kinds, default base URLs, request allow-list and output clamp, upstream call |
 | `src/translate/` | OpenAI and Anthropic request, response and SSE translation |
 | `src/hub.ts` | Durable Object: keys, accounts, combos, ledger, limits, prices, token refresh |
 | `src/oauth/` | OAuth providers (Copilot device flow) |
