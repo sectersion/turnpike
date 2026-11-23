@@ -80,3 +80,17 @@ describe("I5: per-key rpm and in-flight limits", () => {
     expect((await SELF.fetch("http://x/admin/keys/nope", { method: "PATCH", headers: A, body: "{}" })).status).toBe(404);
   });
 });
+
+describe("I7: ledger indexes and schema version", () => {
+  it("ledger has (key_id, ts) and (account_id, ts) indexes; meta records the schema version", async () => {
+    const stub = env.HUB.get(env.HUB.idFromName("idx-" + crypto.randomUUID()));
+    const { idx, v } = await runInDurableObject(stub, async (_i, state) => ({
+      idx: state.storage.sql.exec<{ name: string; sql: string }>("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'ledger'").toArray(),
+      v: state.storage.sql.exec<{ v: number }>("SELECT v FROM meta WHERE k = 'schema'").one().v,
+    }));
+    const by = Object.fromEntries(idx.map((r) => [r.name, r.sql.replace(/\s+/g, " ")]));
+    expect(by.ledger_key_ts).toMatch(/ON ledger ?\(key_id, ts\)/);
+    expect(by.ledger_acct_ts).toMatch(/ON ledger ?\(account_id, ts\)/);
+    expect(v).toBeGreaterThanOrEqual(1);
+  });
+});

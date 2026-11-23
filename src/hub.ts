@@ -75,6 +75,8 @@ export class Hub extends DurableObject<Env> {
           ts INTEGER NOT NULL, key_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL,
           in_tokens INTEGER NOT NULL, out_tokens INTEGER NOT NULL, cost_usd REAL NOT NULL, priced INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS ledger_ts ON ledger (ts);
+        CREATE INDEX IF NOT EXISTS ledger_key_ts ON ledger (key_id, ts);
+        CREATE INDEX IF NOT EXISTS ledger_acct_ts ON ledger (account_id, ts);
         CREATE TABLE IF NOT EXISTS reservations (
           id TEXT PRIMARY KEY, key_id TEXT NOT NULL, account_id TEXT NOT NULL, model TEXT NOT NULL, ts INTEGER NOT NULL,
           est_tokens INTEGER NOT NULL, est_out INTEGER NOT NULL, est_cost_usd REAL NOT NULL, priced INTEGER NOT NULL);
